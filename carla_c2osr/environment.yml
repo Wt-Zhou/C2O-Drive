@@ -1,0 +1,14 @@
+name: c2o-drive
+channels: [conda-forge, defaults]
+dependencies:
+  - python=3.10
+  - numpy
+  - scipy
+  - pyyaml
+  - loguru
+  - rich
+  - pytest
+  - pip
+  - pip:
+      # 预留后续扩展（如 torch/numba/d3rlpy）；现在不要安装 CARLA
+      - typing-extensions>=4.7

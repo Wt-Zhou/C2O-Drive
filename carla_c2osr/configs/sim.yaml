@@ -1,0 +1,16 @@
+grid:
+  size_m: 50.0      # 局部窗口边长（以自车为中心）
+  cell_m: 0.5       # 宏后继单元分辨率（可切换到宏单元合并）
+  macro: true
+horizon: 8          # 8s @ 1Hz
+samples: 32         # 后验采样数 S
+dp:
+  alpha: 0.5        # DP 浓度
+  c: 20.0           # Dirichlet(c·z) 总强度
+  eta: 1.0          # 分数计数学习率
+  add_thresh: 0.15  # 新原子触发阈值（责任）
+risk:
+  mode: union       # union|independent
+  lambda: 5.0       # 风险权重
+  epsilon: 0.2      # 机会约束阈值（每条轨迹）
+gamma: 0.99
