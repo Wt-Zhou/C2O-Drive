@@ -1,5 +1,5 @@
 from __future__ import annotations
-from agents.c2osr.risk import union_risk
+from carla_c2osr.agents.c2osr.risk import union_risk
 
 
 def test_union_risk_bounds() -> None:
