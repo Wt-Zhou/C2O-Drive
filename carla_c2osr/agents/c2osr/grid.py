@@ -104,11 +104,12 @@ class GridMapper:
 
     def successor_cells(self, agent: AgentState, dt: float = 1.0, 
                        n_samples: int = 100) -> List[int]:
-        """计算智能体下一时刻(t+dt)的一步可达网格单元集合。
+        """计算智能体在下一时刻的一步可达网格单元集合。
         
         根据智能体类型使用相应的动力学模型：
         - 行人: 质点模型，可任意方向加速
         - 车辆: 自行车模型，考虑阿克曼转向约束
+        - 自行车/摩托车: 自行车模型，转向能力更强
         
         Args:
             agent: 智能体当前状态
@@ -116,7 +117,7 @@ class GridMapper:
             n_samples: 采样数量，默认 100
             
         Returns:
-            下一时刻可达网格单元索引列表（去重，不包含当前位置）
+            可达网格单元索引列表（去重）
         """
         # 获取智能体动力学参数
         dynamics = AgentDynamicsParams.for_agent_type(agent.agent_type)
@@ -135,17 +136,14 @@ class GridMapper:
             )
         else:
             # 车辆类型：自行车模型
-            # 若速度方向可信，则用其方向替代heading作为当前时刻的有效朝向
-            speed_eps = 0.2
-            heading_eff = current_heading
-            if current_speed > speed_eps:
-                heading_eff = math.atan2(current_vel[1], current_vel[0])
             reachable_indices.update(
-                self._vehicle_successors(current_pos, current_vel, current_speed, heading_eff, dynamics, dt, n_samples)
+                self._vehicle_successors(current_pos, current_speed, current_heading, dynamics, dt, n_samples)
             )
         
-        # 注意：不添加当前位置，只返回下一时刻的可达位置
-        # 这样可达集表示的是从当前位置能够转移到的目标位置
+        # 添加当前位置（静止/保持情况）
+        current_grid = self.to_grid_frame(current_pos)
+        current_idx = self.xy_to_index(current_grid)
+        reachable_indices.add(current_idx)
         
         return list(reachable_indices)
 
@@ -189,7 +187,7 @@ class GridMapper:
         
         return list(reachable_indices)
 
-    def _vehicle_successors(self, pos: Tuple[float, float], vel: Tuple[float, float], speed: float, heading: float,
+    def _vehicle_successors(self, pos: Tuple[float, float], speed: float, heading: float,
                            dynamics: AgentDynamicsParams, dt: float,
                            n_samples: int) -> List[int]:
         """车辆可达集：自行车模型，考虑阿克曼转向约束。"""
@@ -226,14 +224,10 @@ class GridMapper:
             
             yaw_rate = np.clip(yaw_rate, -dynamics.max_yaw_rate_rps, dynamics.max_yaw_rate_rps)
             
-            # 如果速度方向可信，则用速度方向作为当前朝向，以避免heading与速度不一致
-            heading_eff = heading
-            if speed > 0.3:
-                heading_eff = math.atan2(vel[1], vel[0])
-            next_heading = heading_eff + yaw_rate * dt
+            next_heading = heading + yaw_rate * dt
             
             # 位置积分（使用平均航向角）
-            avg_heading = heading_eff + 0.5 * yaw_rate * dt
+            avg_heading = heading + 0.5 * yaw_rate * dt
             next_x = pos[0] + next_speed * math.cos(avg_heading) * dt
             next_y = pos[1] + next_speed * math.sin(avg_heading) * dt
             

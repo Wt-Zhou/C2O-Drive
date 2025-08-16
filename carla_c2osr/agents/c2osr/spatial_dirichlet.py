@@ -43,12 +43,11 @@ class SpatialDirichletBank:
         self.K = K
         self.params = params
         self.agent_alphas: Dict[int, np.ndarray] = {}
-        self.agent_alpha_inits: Dict[int, np.ndarray] = {}
 
     def init_agent(self, agent_id: int, reachable: List[int]) -> None:
         """为智能体初始化 Dirichlet 先验分布。
         
-        在可达集外为alpha_out(1e-6)，可达集内为相等值，使得归一化后每个可达单元概率为1/|reachable|。
+        在可达集合内均匀分配 alpha_in，其余位置设为 alpha_out。
         
         Args:
             agent_id: 智能体 ID
@@ -59,26 +58,12 @@ class SpatialDirichletBank:
         
         alpha = np.full(self.K, self.params.alpha_out, dtype=float)
         
-        # 可达集内每个单元设置相同的alpha值，使得归一化后概率为1/|reachable|
-        # 设alpha_reachable = 1.0，alpha_out很小，这样归一化后可达集内概率约为1/|reachable|
-        alpha_per_cell = 1.0
+        # 在可达集合内均匀分配 alpha_in
+        alpha_per_cell = self.params.alpha_in / len(reachable)
         for idx in reachable:
             alpha[idx] = alpha_per_cell
         
         self.agent_alphas[agent_id] = alpha
-        self.agent_alpha_inits[agent_id] = alpha.copy()
-        
-        # 验证初始化后的概率分布
-        initial_probs = self.posterior_mean(agent_id)
-        reachable_probs = [initial_probs[idx] for idx in reachable]
-        reachable_prob_sum = sum(reachable_probs)
-        avg_reachable_prob = reachable_prob_sum / len(reachable) if len(reachable) > 0 else 0
-        expected_prob = 1.0 / len(reachable)
-        
-        print(f"Agent {agent_id}: 可达集大小={len(reachable)}, "
-              f"可达集概率总和={reachable_prob_sum:.6f}, "
-              f"平均可达概率={avg_reachable_prob:.6f}, "
-              f"期望概率={expected_prob:.6f}")
 
     def ensure_agent(self, agent_id: int, reachable: List[int]) -> None:
         """确保智能体已初始化，如果不存在则自动初始化。
@@ -191,23 +176,6 @@ class SpatialDirichletBank:
         assert agent_id in self.agent_alphas, f"Agent {agent_id} not initialized"
         return self.agent_alphas[agent_id].copy()
 
-    def get_agent_counts(self, agent_id: int, subtract_prior: bool = True) -> np.ndarray:
-        """获取智能体累计软计数（近似）：alpha 或 alpha - alpha_prior。
-        
-        Args:
-            agent_id: 智能体 ID
-            subtract_prior: 是否减去初始化先验 alpha
-        
-        Returns:
-            形状 (K,) 的非负计数近似
-        """
-        assert agent_id in self.agent_alphas, f"Agent {agent_id} not initialized"
-        counts = self.agent_alphas[agent_id].copy()
-        if subtract_prior and agent_id in self.agent_alpha_inits:
-            counts = counts - self.agent_alpha_inits[agent_id]
-            counts[counts < 0] = 0.0
-        return counts
-
     def get_agent_count(self) -> int:
         """获取已初始化的智能体数量。
         
@@ -215,3 +183,34 @@ class SpatialDirichletBank:
             智能体数量
         """
         return len(self.agent_alphas)
+
+    def get_agent_counts(self, agent_id: int, subtract_prior: bool = True) -> np.ndarray:
+        """获取智能体的计数向量（用于可视化）。
+        
+        Args:
+            agent_id: 智能体 ID
+            subtract_prior: 是否减去先验值（初始alpha）
+            
+        Returns:
+            形状 (K,) 的计数向量
+        """
+        assert agent_id in self.agent_alphas, f"Agent {agent_id} not initialized"
+        
+        alpha = self.agent_alphas[agent_id]
+        
+        if subtract_prior:
+            # 减去初始alpha值，得到实际的观测计数
+            # 注意：这里需要知道初始alpha值，暂时用简单估计
+            # 对于可达集内的单元，初始值应该是 alpha_in / len(reachable)
+            # 对于可达集外的单元，初始值应该是 alpha_out
+            # 由于我们没有存储初始reachable信息，这里用简单方法
+            alpha_init = np.full_like(alpha, self.params.alpha_out)
+            # 假设前几个非零位置是可达集（这是一个简化）
+            nonzero_indices = np.nonzero(alpha > self.params.alpha_out)[0]
+            if len(nonzero_indices) > 0:
+                # 简单估计：假设初始时可达集内均匀分布
+                alpha_init[nonzero_indices] = self.params.alpha_in / len(nonzero_indices)
+            
+            return alpha - alpha_init
+        else:
+            return alpha.copy()

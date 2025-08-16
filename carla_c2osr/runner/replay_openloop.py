@@ -34,9 +34,10 @@ def create_scenario(grid_size_m: float = 20.0) -> WorldState:
     ego = EgoState(position_m=(0.0, 0.0), velocity_mps=(5.0, 0.0), yaw_rad=0.0)
     
     # 确保智能体位置在网格范围内 [-grid_size_m/2, grid_size_m/2] = [-10, 10]
+    # 修改智能体位置，让它们更接近自车轨迹，增加碰撞可能性
     agent1 = AgentState(
         agent_id="vehicle-1",
-        position_m=(6.0, 12.0),
+        position_m=(2.0, 2.0),  # 更接近自车
         velocity_mps=(4.0, 0.0),
         heading_rad=0.0,
         agent_type=AgentType.VEHICLE
@@ -44,7 +45,7 @@ def create_scenario(grid_size_m: float = 20.0) -> WorldState:
     
     agent2 = AgentState(
         agent_id="pedestrian-1", 
-        position_m=(14.0, -8.0),
+        position_m=(3.0, -1.0),  # 更接近自车
         velocity_mps=(0.8, 0.3),
         heading_rad=0.3,
         agent_type=AgentType.PEDESTRIAN
@@ -93,6 +94,255 @@ def setup_output_dirs(base_dir: str = "outputs/replay_experiment") -> Path:
     base_path = Path(base_dir)
     base_path.mkdir(parents=True, exist_ok=True)
     return base_path
+
+
+def sample_agent_transitions(bank: SpatialDirichletBank, agent_id: int, reachable: List[int], 
+                           n_samples: int = 10, rng: np.random.Generator = None) -> List[int]:
+    """从Dirichlet分布采样智能体的可能转移。
+    
+    Args:
+        bank: Dirichlet Bank
+        agent_id: 智能体ID
+        reachable: 可达集
+        n_samples: 采样数量
+        rng: 随机数生成器
+        
+    Returns:
+        采样的转移单元ID列表
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    
+    # 获取当前alpha
+    alpha = bank.get_agent_alpha(agent_id)
+    
+    # 从Dirichlet分布采样
+    sampled_probs = rng.dirichlet(alpha, size=n_samples)
+    
+    # 对每个采样，选择概率最高的可达单元
+    transitions = []
+    for probs in sampled_probs:
+        # 只在可达集内选择
+        reachable_probs = probs[reachable]
+        max_idx = np.argmax(reachable_probs)
+        transitions.append(reachable[max_idx])
+    
+    return transitions
+
+
+def check_collision(agent_cell: int, ego_trajectory_cells: List[int], 
+                   agent_probability: float, collision_threshold: float = 0.1) -> bool:
+    """检查智能体和自车是否发生碰撞。
+    
+    Args:
+        agent_cell: 智能体到达的格子ID
+        ego_trajectory_cells: 自车轨迹的格子ID列表
+        agent_probability: 智能体到达该格子的概率
+        collision_threshold: 碰撞检测阈值
+        
+    Returns:
+        是否发生碰撞
+    """
+    # 如果智能体概率大于阈值且自车也到达该格子，则发生碰撞
+    return agent_probability > collision_threshold and agent_cell in ego_trajectory_cells
+
+
+def calculate_reward(ego_state: EgoState, ego_next_state: EgoState, 
+                    agent_state: AgentState, agent_next_state: AgentState,
+                    collision: bool, collision_penalty: float = -100.0,
+                    speed_reward_weight: float = 1.0, 
+                    acceleration_penalty_weight: float = 0.1) -> float:
+    """计算reward值。
+    
+    Args:
+        ego_state: 自车当前状态
+        ego_next_state: 自车下一状态
+        agent_state: 智能体当前状态
+        agent_next_state: 智能体下一状态
+        collision: 是否发生碰撞
+        collision_penalty: 碰撞惩罚值
+        speed_reward_weight: 速度奖励权重
+        acceleration_penalty_weight: 加速度惩罚权重
+        
+    Returns:
+        reward值
+    """
+    reward = 0.0
+    
+    # 碰撞惩罚
+    if collision:
+        reward += collision_penalty
+        return reward
+    
+    # 速度奖励（鼓励保持合理速度）
+    ego_speed = np.linalg.norm(ego_state.velocity_mps)
+    target_speed = 5.0  # 目标速度
+    speed_reward = -abs(ego_speed - target_speed) * speed_reward_weight
+    reward += speed_reward
+    
+    # 加速度惩罚（鼓励平滑驾驶）
+    ego_accel = np.linalg.norm(np.array(ego_next_state.velocity_mps) - np.array(ego_state.velocity_mps))
+    accel_penalty = -ego_accel * acceleration_penalty_weight
+    reward += accel_penalty
+    
+    # 距离奖励（与智能体保持安全距离）
+    ego_pos = np.array(ego_state.position_m)
+    agent_pos = np.array(agent_state.position_m)
+    distance = np.linalg.norm(ego_pos - agent_pos)
+    safe_distance = 3.0
+    if distance < safe_distance:
+        distance_penalty = -(safe_distance - distance) * 2.0
+        reward += distance_penalty
+    
+    return reward
+
+
+def evaluate_q_values(bank: SpatialDirichletBank, agent_id: int, reachable: List[int],
+                     ego_state: EgoState, ego_next_state: EgoState,
+                     agent_state: AgentState, grid: GridMapper,
+                     ego_trajectory_cells: List[int], n_samples: int = 10,
+                     collision_threshold: float = 0.1, rng: np.random.Generator = None) -> List[float]:
+    """评估智能体在当前状态下的Q值（reward期望）。
+    
+    Args:
+        bank: Dirichlet Bank
+        agent_id: 智能体ID
+        reachable: 可达集
+        ego_state: 自车当前状态
+        ego_next_state: 自车下一状态
+        agent_state: 智能体当前状态
+        grid: 网格映射器
+        ego_trajectory_cells: 自车轨迹格子ID列表
+        n_samples: 采样数量
+        collision_threshold: 碰撞检测阈值
+        rng: 随机数生成器
+        
+    Returns:
+        n个采样对应的reward值列表
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    
+    # 获取当前alpha
+    alpha = bank.get_agent_alpha(agent_id)
+    
+    # 从Dirichlet分布采样n次
+    sampled_probs = rng.dirichlet(alpha, size=n_samples)
+    
+    # 检查自车未来轨迹是否与agent可达集重叠
+    overlap_cells = set(ego_trajectory_cells) & set(reachable)
+    has_overlap = len(overlap_cells) > 0
+    
+    print(f"    Agent {agent_id} 可达集大小: {len(reachable)}, 自车轨迹格子: {ego_trajectory_cells}")
+    print(f"    重叠格子: {list(overlap_cells) if has_overlap else '无重叠'}")
+    
+    rewards = []
+    for i, probs in enumerate(sampled_probs):
+        # 提取可达集上的概率分布
+        reachable_probs = probs[reachable]
+        
+        # 计算碰撞概率
+        collision_prob = 0.0
+        collision_count = 0
+        
+        if has_overlap:
+            # 计算重叠格子上的总概率
+            for cell_idx, cell_id in enumerate(reachable):
+                if cell_id in overlap_cells:
+                    cell_prob = reachable_probs[cell_idx]
+                    if cell_prob > collision_threshold:
+                        collision_prob += cell_prob
+                        collision_count += 1
+        
+        # 碰撞项：如果有重叠且概率大于阈值，则碰撞概率为重叠概率总和
+        collision_penalty = -100.0 if collision_prob > collision_threshold else 0.0
+        
+        # 速度奖励项：基于自车未来轨迹计算
+        ego_speed = np.linalg.norm(ego_state.velocity_mps)
+        target_speed = 5.0  # 目标速度
+        speed_reward = -abs(ego_speed - target_speed)  # 速度偏差惩罚
+        
+        # 总reward
+        reward = collision_penalty + speed_reward
+        
+        rewards.append(reward)
+        
+        # 打印详细信息
+        print(f"      采样{i+1}: 碰撞概率{collision_prob:.3f}, 碰撞格子数{collision_count}, "
+              f"速度{ego_speed:.2f}, 速度奖励{speed_reward:.2f}, 总reward{reward:.2f}")
+    
+    return rewards
+
+
+def calculate_buffer_counts(trajectory_buffer: TrajectoryBuffer, scenario_state: ScenarioState,
+                           agent_ids: List[int], timestep: int, grid: GridMapper) -> Dict[int, np.ndarray]:
+    """从Trajectory Buffer计算每个智能体的计数向量。
+    
+    Args:
+        trajectory_buffer: 轨迹缓冲区
+        scenario_state: 场景状态
+        agent_ids: 智能体ID列表
+        timestep: 时间步
+        grid: 网格映射器
+        
+    Returns:
+        字典 {agent_id: count_vector}，每个count_vector是K维向量
+    """
+    counts = {}
+    for agent_id in agent_ids:
+        # 获取历史转移数据
+        historical_transitions = trajectory_buffer.get_agent_historical_transitions(
+            scenario_state, agent_id, timestep=timestep
+        )
+        
+        # 创建计数向量
+        count_vector = np.zeros(grid.K, dtype=float)
+        for cell_id in historical_transitions:
+            count_vector[cell_id] += 1.0
+            
+        counts[agent_id] = count_vector
+    
+    return counts
+
+
+def calculate_fuzzy_buffer_counts(trajectory_buffer: TrajectoryBuffer, scenario_state: ScenarioState,
+                                agent_ids: List[int], timestep: int, grid: GridMapper,
+                                position_threshold: float = 3.0,
+                                velocity_threshold: float = 2.0,
+                                heading_threshold: float = 0.8) -> Dict[int, np.ndarray]:
+    """从Trajectory Buffer计算每个智能体的模糊匹配计数向量。
+    
+    Args:
+        trajectory_buffer: 轨迹缓冲区
+        scenario_state: 场景状态
+        agent_ids: 智能体ID列表
+        timestep: 时间步
+        grid: 网格映射器
+        position_threshold: 位置相似度阈值（米）
+        velocity_threshold: 速度相似度阈值（米/秒）
+        heading_threshold: 朝向相似度阈值（弧度）
+        
+    Returns:
+        字典 {agent_id: count_vector}，每个count_vector是K维向量
+    """
+    counts = {}
+    for agent_id in agent_ids:
+        # 获取模糊匹配的历史转移数据
+        historical_transitions = trajectory_buffer.get_agent_fuzzy_historical_transitions(
+            scenario_state, agent_id, timestep=timestep,
+            position_threshold=position_threshold,
+            velocity_threshold=velocity_threshold,
+            heading_threshold=heading_threshold
+        )
+        
+        # 创建计数向量
+        count_vector = np.zeros(grid.K, dtype=float)
+        for cell_id in historical_transitions:
+            count_vector[cell_id] += 1.0
+            
+        counts[agent_id] = count_vector
+    
+    return counts
 
 
 def generate_agent_trajectory(agent: AgentState, horizon: int, dt: float = 1.0, 
@@ -194,7 +444,9 @@ def run_episode(episode_id: int, horizon: int, ego_trajectory: List[np.ndarray],
         agent_id = i + 1
         try:
             # 生成符合动力学约束的轨迹
-            trajectory = generate_agent_trajectory(agent, horizon, grid_bounds=(-25.0, 25.0))
+            # 根据网格大小设置边界
+            grid_half_size = grid.size_m / 2.0
+            trajectory = generate_agent_trajectory(agent, horizon, grid_bounds=(-grid_half_size, grid_half_size))
             agent_trajectories[agent_id] = trajectory
             
             # 将轨迹转换为网格单元ID
@@ -213,7 +465,8 @@ def run_episode(episode_id: int, horizon: int, ego_trajectory: List[np.ndarray],
             start_pos = np.array(agent.position_m)
             for t in range(horizon):
                 next_pos = start_pos + np.array([0.5 * t, 0.1 * t])  # 简单移动
-                next_pos = np.clip(next_pos, -9.0, 9.0)
+                grid_half_size = grid.size_m / 2.0
+                next_pos = np.clip(next_pos, -grid_half_size, grid_half_size)
                 fallback_trajectory.append(next_pos)
                 fallback_cells.append(grid.world_to_cell(tuple(next_pos)))
             agent_trajectories[agent_id] = fallback_trajectory
@@ -262,6 +515,9 @@ def run_episode(episode_id: int, horizon: int, ego_trajectory: List[np.ndarray],
         # 构建当前世界状态
         world_current = WorldState(time_s=float(t), ego=ego, agents=current_agents)
         
+        # 基于当前时刻状态创建ScenarioState（用于查询历史数据）
+        current_scenario_state = create_scenario_state(world_current)
+        
         # 计算每个智能体当前位置的下一时刻可达集
         current_reachable = {}
         for i, agent in enumerate(current_agents):
@@ -269,60 +525,79 @@ def run_episode(episode_id: int, horizon: int, ego_trajectory: List[np.ndarray],
             reachable = grid.successor_cells(agent, n_samples=50)
             current_reachable[agent_id] = reachable
         
-        # 使用历史数据和当前观测更新Dirichlet分布
+        # 每个时刻重新初始化Dirichlet Bank，基于当前可达集和历史数据
         for i, agent in enumerate(current_agents):
             agent_id = i + 1
             try:
-                # 获取历史转移数据
-                historical_transitions = trajectory_buffer.get_agent_historical_transitions(
-                    scenario_state, agent_id, timestep=t
-                )
+                # 获取当前位置的可达集
+                reachable = current_reachable[agent_id]
                 
-                # 计算当前观测的下一步位置（如果不是最后一步）
-                if t < horizon - 1:
-                    next_pos = agent_trajectories[agent_id][t + 1]
-                    next_cell_id = grid.world_to_cell(tuple(next_pos))
+                if len(reachable) > 0:
+                    # 重新初始化该智能体的Dirichlet分布
+                    bank.init_agent(agent_id, reachable)
                     
-                    # 获取当前位置的可达集
-                    reachable = current_reachable[agent_id]
+                    # 获取历史转移数据（基于当前状态，timestep=0表示下一秒）
+                    # 使用模糊匹配获取相似状态下的历史数据
+                    historical_transitions = trajectory_buffer.get_agent_fuzzy_historical_transitions(
+                        current_scenario_state, agent_id, timestep=0,
+                        position_threshold=10.0,  # 位置阈值3米
+                        velocity_threshold=10.0,  # 速度阈值2m/s
+                        heading_threshold=3.14    # 朝向阈值0.8弧度（约45度）
+                    )
                     
-                    if len(reachable) > 0:
+                    # 如果有历史数据，计算软计数并更新alpha
+                    if len(historical_transitions) > 0:
                         # 创建基于可达集的软计数
                         w = np.zeros(grid.K, dtype=float)
-                        
                         # 将历史转移数据加入软计数
                         for hist_cell in historical_transitions:
                             if hist_cell in reachable:
                                 w[hist_cell] += 1.0
                         
-                        # 将当前观测加入软计数
-                        if next_cell_id in reachable:
-                            w[next_cell_id] += 1.0
-                        
                         # 归一化到可达集
                         if w.sum() > 0:
                             w = w / w.sum()
-                        else:
-                            # 如果没有历史数据且当前转移不在可达集内，使用均匀分布
-                            for idx in reachable:
-                                w[idx] = 1.0 / len(reachable)
+                            # 直接设置alpha（基于历史数据）
+                            bank.agent_alphas[agent_id] = bank.params.alpha_in * w
+                    
+                    print(f"    Agent {agent_id}: 历史={len(historical_transitions)}, "
+                          f"可达集={len(reachable)}")
+                    
+                    # Q值评估：从Dirichlet分布采样并计算reward
+                    if t < horizon - 1:  # 不是最后一步
+                        # 获取自车下一状态
+                        ego_next_world_xy = ego_trajectory[t + 1]
+                        ego_next = EgoState(position_m=tuple(ego_next_world_xy), velocity_mps=(5.0, 0.0), yaw_rad=0.0)
                         
-                        # 检查Alpha参数防止溢出
-                        current_alpha_sum = bank.get_agent_alpha(agent_id).sum()
-                        if current_alpha_sum > 10000:
-                            lr = 0.1
-                            print(f"    警告: Agent {agent_id} alpha过大({current_alpha_sum:.1f})")
-                        else:
-                            lr = 1.0
-                            
-                        # 更新Dirichlet分布
-                        bank.update_with_softcount(agent_id, w, lr=lr)
+                        # 计算自车轨迹的格子ID
+                        ego_trajectory_cells = []
+                        for future_t in range(t + 1, min(t + 3, horizon)):  # 看未来2步
+                            if future_t < len(ego_trajectory):
+                                ego_future_xy = ego_trajectory[future_t]
+                                ego_cell = grid.world_to_cell(tuple(ego_future_xy))
+                                ego_trajectory_cells.append(ego_cell)
                         
-                        print(f"    Agent {agent_id}: 历史={len(historical_transitions)}, "
-                              f"可达集={len(reachable)}, 下一步={next_cell_id}")
+                        print(f"    Agent {agent_id} Q值评估:")
+                        rewards = evaluate_q_values(
+                            bank=bank,
+                            agent_id=agent_id,
+                            reachable=reachable,
+                            ego_state=ego,
+                            ego_next_state=ego_next,
+                            agent_state=current_agent,
+                            grid=grid,
+                            ego_trajectory_cells=ego_trajectory_cells,
+                            n_samples=5,  # 采样5次
+                            collision_threshold=0.05,  # 降低碰撞阈值，更容易触发
+                            rng=rng
+                        )
+                        
+                        # 计算平均reward
+                        avg_reward = np.mean(rewards)
+                        print(f"    Agent {agent_id} 平均reward: {avg_reward:.2f}")
                 
             except Exception as e:
-                print(f"    错误: Agent {agent_id} 更新失败: {e}")
+                print(f"    错误: Agent {agent_id} 初始化失败: {e}")
                 continue
         
         # 计算当前“计数图”或概率图用于可视化
@@ -338,15 +613,36 @@ def run_episode(episode_id: int, horizon: int, ego_trajectory: List[np.ndarray],
         elif vis_mode == "pmean-avg":
             p_plot = 0.5 * (bank.posterior_mean(1) + bank.posterior_mean(2))
         elif vis_mode == "counts-agent1":
-            c = bank.get_agent_counts(1, subtract_prior=True)
+            # 使用Trajectory Buffer的计数（基于当前状态）
+            buffer_counts = calculate_buffer_counts(trajectory_buffer, current_scenario_state, [1], 0, grid)
+            c = buffer_counts[1]
             p_plot = c / (np.max(c) + 1e-12)
         elif vis_mode == "counts-agent2":
-            c = bank.get_agent_counts(2, subtract_prior=True)
+            # 使用Trajectory Buffer的计数（基于当前状态）
+            buffer_counts = calculate_buffer_counts(trajectory_buffer, current_scenario_state, [2], 0, grid)
+            c = buffer_counts[2]
             p_plot = c / (np.max(c) + 1e-12)
         elif vis_mode == "counts-avg":
-            c1 = bank.get_agent_counts(1, subtract_prior=True)
-            c2 = bank.get_agent_counts(2, subtract_prior=True)
-            c = 0.5 * (c1 + c2)
+            # 使用Trajectory Buffer的计数（基于当前状态）
+            buffer_counts = calculate_buffer_counts(trajectory_buffer, current_scenario_state, [1, 2], 0, grid)
+            c1 = buffer_counts[1]
+            c2 = buffer_counts[2]
+            # 叠加两个agent的计数，保持原始值
+            c = c1 + c2
+            p_plot = c / (np.max(c) + 1e-12)
+        elif vis_mode == "current-counts":
+            # 显示当前时刻状态下的历史transition计数
+            buffer_counts = calculate_buffer_counts(trajectory_buffer, current_scenario_state, [1, 2], 0, grid)
+            c1 = buffer_counts[1]
+            c2 = buffer_counts[2]
+            c = c1 + c2
+            p_plot = c / (np.max(c) + 1e-12)
+        elif vis_mode == "fuzzy-counts":
+            # 显示模糊匹配的历史transition计数
+            buffer_counts = calculate_fuzzy_buffer_counts(trajectory_buffer, current_scenario_state, [1, 2], 0, grid, 10, 10, 3.14)
+            c1 = buffer_counts[1]
+            c2 = buffer_counts[2]
+            c = c1 + c2
             p_plot = c / (np.max(c) + 1e-12)
         else:
             p_plot = bank.conservative_qmax_union([1, 2])
@@ -394,22 +690,66 @@ def run_episode(episode_id: int, horizon: int, ego_trajectory: List[np.ndarray],
     gif_path = output_dir / f"episode_{episode_id:02d}.gif"
     make_gif(frame_paths, str(gif_path), fps=2)
     
-    # 将轨迹数据存储到buffer
-    trajectory_data_list = []
-    for i, agent in enumerate(world_init.agents):
-        agent_id = i + 1
-        if agent_id in agent_trajectory_cells:
-            traj_data = AgentTrajectoryData(
-                agent_id=agent_id,
-                agent_type=agent.agent_type.value,
-                init_position=agent.position_m,
-                init_velocity=agent.velocity_mps,
-                init_heading=agent.heading_rad,
-                trajectory_cells=agent_trajectory_cells[agent_id]
-            )
-            trajectory_data_list.append(traj_data)
+    # 将轨迹数据存储到buffer（按时间步存储）
+    timestep_scenarios = []
     
-    trajectory_buffer.store_episode_trajectories(scenario_state, episode_id, trajectory_data_list)
+    # 为每个时刻创建轨迹数据
+    for t in range(horizon):
+        # 获取当前时刻的世界状态
+        ego_world_xy = ego_trajectory[t]
+        ego = EgoState(position_m=tuple(ego_world_xy), velocity_mps=(5.0, 0.0), yaw_rad=0.0)
+        
+        current_agents = []
+        for i, agent_init in enumerate(world_init.agents):
+            agent_id = i + 1
+            agent_world_xy = agent_trajectories[agent_id][t]
+            
+            # 用轨迹的相邻点估计当前速度与朝向
+            if t < horizon - 1:
+                nxt = agent_trajectories[agent_id][t + 1]
+                vel_vec = (nxt - agent_world_xy)
+            elif t > 0:
+                prv = agent_trajectories[agent_id][t - 1]
+                vel_vec = (agent_world_xy - prv)
+            else:
+                vel_vec = np.array(agent_init.velocity_mps)
+            
+            vel_tuple = (float(vel_vec[0]), float(vel_vec[1]))
+            heading_est = float(np.arctan2(vel_vec[1], vel_vec[0])) if (vel_vec[0]**2 + vel_vec[1]**2) > 1e-9 else float(agent_init.heading_rad)
+            
+            current_agent = AgentState(
+                agent_id=agent_init.agent_id,
+                position_m=tuple(agent_world_xy),
+                velocity_mps=vel_tuple,
+                heading_rad=heading_est,
+                agent_type=agent_init.agent_type
+            )
+            current_agents.append(current_agent)
+        
+        # 创建当前时刻的场景状态
+        current_scenario_state = create_scenario_state(WorldState(time_s=float(t), ego=ego, agents=current_agents))
+        
+        # 创建当前时刻的轨迹数据（只包含下一步）
+        timestep_trajectory_data = []
+        for i, agent in enumerate(current_agents):
+            agent_id = i + 1
+            if agent_id in agent_trajectory_cells and t < len(agent_trajectory_cells[agent_id]):
+                # 只存储从当前时刻开始的剩余轨迹
+                remaining_cells = agent_trajectory_cells[agent_id][t:]
+                traj_data = AgentTrajectoryData(
+                    agent_id=agent_id,
+                    agent_type=agent.agent_type.value,
+                    init_position=agent.position_m,
+                    init_velocity=agent.velocity_mps,
+                    init_heading=agent.heading_rad,
+                    trajectory_cells=remaining_cells
+                )
+                timestep_trajectory_data.append(traj_data)
+        
+        timestep_scenarios.append((current_scenario_state, timestep_trajectory_data))
+    
+    # 存储按时间步组织的数据
+    trajectory_buffer.store_episode_trajectories_by_timestep(episode_id, timestep_scenarios)
     
     return {
         'episode_id': episode_id,
@@ -433,12 +773,16 @@ def main():
         choices=[
             "qmax",
             "pmean-agent1", "pmean-agent2", "pmean-avg",
-            "counts-agent1", "counts-agent2", "counts-avg"
+            "counts-agent1", "counts-agent2", "counts-avg",
+            "current-counts",
+            "fuzzy-counts"
         ],
         default="qmax",
         help=(
             "可视化模式：qmax(保守并集上界)；pmean-* 为后验均值；"
-            "counts-* 为计数(α-α_prior)归一化"
+            "counts-* 为计数(α-α_prior)归一化；"
+            "current-counts为当前状态下的历史transition计数；"
+            "fuzzy-counts为模糊匹配的历史transition计数"
         )
     )
     
@@ -458,7 +802,7 @@ def main():
     ego_start_pos = world_init.ego.position_m
     
     # 注意：若希望展示 50m×50m，将 size_m 调整为 50.0，并保持可视化extent一致
-    grid_spec = GridSpec(size_m=50.0, cell_m=0.5, macro=True)
+    grid_spec = GridSpec(size_m=100.0, cell_m=0.5, macro=True)
     grid = GridMapper(grid_spec, world_center=ego_start_pos)
     
     dirichlet_params = DirichletParams(alpha_in=30.0, alpha_out=1e-6, delta=0.05, cK=1.0)

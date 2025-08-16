@@ -75,7 +75,7 @@ def grid_heatmap(
             # 使用方形marker，只有边框不填充，避免与热力图颜色冲突
             edge_color = reachable_colors[ridx % len(reachable_colors)]
             # marker大小（以点为单位），与格子尺寸近似匹配
-            marker_size_pts2 = max(10.0, (300.0 / N) ** 2)
+            marker_size_pts2 = max(5.0, (300.0 / N) ** 2)
             ax.scatter(
                 xs,
                 ys,
