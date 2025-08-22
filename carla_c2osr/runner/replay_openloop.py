@@ -254,22 +254,30 @@ def evaluate_q_values(bank: SpatialDirichletBank, agent_id: int, reachable: List
                         collision_prob += cell_prob
                         collision_count += 1
         
-        # 碰撞项：如果有重叠且概率大于阈值，则碰撞概率为重叠概率总和
-        collision_penalty = -100.0 if collision_prob > collision_threshold else 0.0
+        # 判断是否发生碰撞
+        collision = collision_prob > collision_threshold
         
-        # 速度奖励项：基于自车未来轨迹计算
-        ego_speed = np.linalg.norm(ego_state.velocity_mps)
-        target_speed = 5.0  # 目标速度
-        speed_reward = -abs(ego_speed - target_speed)  # 速度偏差惩罚
+        # 创建智能体下一状态（简化，只更新位置）
+        # 这里我们简化处理，使用当前状态作为下一状态
+        agent_next_state = agent_state
         
-        # 总reward
-        reward = collision_penalty + speed_reward
+        # 使用calculate_reward函数计算reward
+        reward = calculate_reward(
+            ego_state=ego_state,
+            ego_next_state=ego_next_state,
+            agent_state=agent_state,
+            agent_next_state=agent_next_state,
+            collision=collision,
+            collision_penalty=-100.0,
+            speed_reward_weight=1.0,
+            acceleration_penalty_weight=0.1
+        )
         
         rewards.append(reward)
         
         # 打印详细信息
         print(f"      采样{i+1}: 碰撞概率{collision_prob:.3f}, 碰撞格子数{collision_count}, "
-              f"速度{ego_speed:.2f}, 速度奖励{speed_reward:.2f}, 总reward{reward:.2f}")
+              f"碰撞{collision}, 总reward{reward:.2f}")
     
     return rewards
 
