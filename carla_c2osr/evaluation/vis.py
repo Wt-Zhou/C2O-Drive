@@ -115,4 +115,6 @@ def make_gif(frame_paths: List[str], out_path: str, fps: int = 2) -> None:
     for path in frame_paths:
         images.append(imageio.imread(path))
     
-    imageio.mimsave(out_path, images, fps=fps, loop=0)
+    # 计算duration（毫秒）
+    duration = int(1000 / fps)
+    imageio.mimsave(out_path, images, duration=duration, loop=0)
