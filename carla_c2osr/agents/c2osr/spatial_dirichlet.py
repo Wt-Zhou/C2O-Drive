@@ -214,3 +214,254 @@ class SpatialDirichletBank:
             return alpha - alpha_init
         else:
             return alpha.copy()
+
+
+class MultiTimestepSpatialDirichletBank:
+    """维护每个智能体在多个时间步的空间Dirichlet分布。
+    
+    为每个智能体在每个时间步维护一个独立的K维Dirichlet伪计数向量，
+    支持多时间步转移概率建模。
+    """
+
+    def __init__(self, K: int, params: DirichletParams, horizon: int = 3) -> None:
+        """初始化多时间步空间Dirichlet银行。
+        
+        Args:
+            K: 网格单元总数
+            params: Dirichlet参数配置
+            horizon: 预测时间步数
+        """
+        assert K > 0, "Grid size K must be positive"
+        assert horizon > 0, "Horizon must be positive"
+        
+        self.K = K
+        self.params = params
+        self.horizon = horizon
+        
+        # 每个智能体在每个时间步的alpha参数
+        # agent_alphas[agent_id][timestep] = alpha_vector
+        self.agent_alphas: Dict[int, Dict[int, np.ndarray]] = {}
+
+    def init_agent(self, agent_id: int, reachable_sets: Dict[int, List[int]]) -> None:
+        """为智能体在所有时间步初始化Dirichlet先验分布。
+        
+        Args:
+            agent_id: 智能体ID
+            reachable_sets: {timestep: [reachable_cell_indices]}
+        """
+        self.agent_alphas[agent_id] = {}
+        
+        for timestep in range(1, self.horizon + 1):
+            alpha = np.full(self.K, self.params.alpha_out, dtype=float)
+            
+            if timestep in reachable_sets:
+                reachable = reachable_sets[timestep]
+                if len(reachable) > 0:
+                    alpha_in_per_cell = self.params.alpha_in / len(reachable)
+                    for cell_idx in reachable:
+                        if 0 <= cell_idx < self.K:
+                            alpha[cell_idx] = alpha_in_per_cell
+            
+            self.agent_alphas[agent_id][timestep] = alpha
+
+    def update_with_softcount(self, agent_id: int, timestep: int, w: np.ndarray, lr: float = 1.0) -> None:
+        """使用软计数更新指定时间步的Dirichlet参数。
+        
+        Args:
+            agent_id: 智能体ID
+            timestep: 时间步
+            w: 软计数向量 (K维)
+            lr: 学习率
+        """
+        if agent_id not in self.agent_alphas:
+            raise ValueError(f"Agent {agent_id} not initialized")
+        
+        if timestep not in self.agent_alphas[agent_id]:
+            raise ValueError(f"Timestep {timestep} not initialized for agent {agent_id}")
+        
+        # 更新alpha参数：alpha_new = alpha_old + lr * w
+        self.agent_alphas[agent_id][timestep] += lr * w
+
+    def get_agent_alpha(self, agent_id: int, timestep: int) -> np.ndarray:
+        """获取智能体在指定时间步的alpha参数。"""
+        if agent_id not in self.agent_alphas:
+            raise ValueError(f"Agent {agent_id} not initialized")
+        
+        if timestep not in self.agent_alphas[agent_id]:
+            raise ValueError(f"Timestep {timestep} not initialized for agent {agent_id}")
+        
+        return self.agent_alphas[agent_id][timestep].copy()
+
+    def posterior_mean(self, agent_id: int, timestep: int) -> np.ndarray:
+        """计算智能体在指定时间步的后验均值概率。"""
+        alpha = self.get_agent_alpha(agent_id, timestep)
+        return alpha / alpha.sum()
+
+    def sample_trajectory(self, agent_id: int) -> Dict[int, np.ndarray]:
+        """从智能体的多时间步Dirichlet分布中采样一条完整轨迹。
+        
+        Returns:
+            {timestep: probability_vector} 每个时间步的概率分布
+        """
+        if agent_id not in self.agent_alphas:
+            raise ValueError(f"Agent {agent_id} not initialized")
+        
+        trajectory = {}
+        for timestep in range(1, self.horizon + 1):
+            if timestep in self.agent_alphas[agent_id]:
+                alpha = self.agent_alphas[agent_id][timestep]
+                # 从Dirichlet分布采样
+                prob_vector = np.random.dirichlet(alpha)
+                trajectory[timestep] = prob_vector
+        
+        return trajectory
+
+    def l1_radius(self, agent_id: int, timestep: int) -> float:
+        """计算智能体在指定时间步的L1置信半径。"""
+        alpha = self.get_agent_alpha(agent_id, timestep)
+        alpha_sum = alpha.sum()
+        
+        if alpha_sum <= 0:
+            return float('inf')
+        
+        # 计算L1置信半径
+        term1 = math.sqrt(math.log(2.0 / self.params.delta) / (2 * alpha_sum))
+        term2 = math.log(2.0 / self.params.delta) / (3 * alpha_sum)
+        
+        return self.params.cK * (term1 + term2)
+
+
+class OptimizedMultiTimestepSpatialDirichletBank:
+    """终极优化版本：维度仅等于可达集大小的多时间步空间狄利克雷银行
+    
+    核心优化：
+    1. 每个时间步的Dirichlet分布维度只等于该时间步的可达集大小
+    2. 直接在可达集上操作，无需后处理
+    3. 支持高效的期望计算，完全消除采样
+    """
+
+    def __init__(self, K: int, params: DirichletParams, horizon: int = 8) -> None:
+        """初始化优化的多时间步空间Dirichlet银行。
+        
+        Args:
+            K: 网格单元总数（用于兼容性，实际维度会动态调整）
+            params: Dirichlet参数配置
+            horizon: 时间范围
+        """
+        self.K = K
+        self.params = params
+        self.horizon = horizon
+        
+        # 存储每个agent在每个时间步的alpha参数和可达集
+        # agent_alphas[agent_id][timestep] = np.array of size len(reachable_set)
+        # agent_reachable_sets[agent_id][timestep] = List[int] 可达集的cell indices
+        self.agent_alphas: Dict[int, Dict[int, np.ndarray]] = {}
+        self.agent_reachable_sets: Dict[int, Dict[int, List[int]]] = {}
+
+    def init_agent(self, agent_id: int, reachable_sets: Dict[int, List[int]]) -> None:
+        """为智能体初始化优化的Dirichlet先验分布。
+        
+        Args:
+            agent_id: 智能体ID
+            reachable_sets: {timestep: [reachable_cell_indices]} 每个时间步的可达集
+        """
+        self.agent_alphas[agent_id] = {}
+        self.agent_reachable_sets[agent_id] = {}
+        
+        # 计算均匀分配的alpha_in值
+        for timestep, reachable in reachable_sets.items():
+            if len(reachable) == 0:
+                continue
+                
+            # 存储可达集
+            self.agent_reachable_sets[agent_id][timestep] = reachable.copy()
+            
+            # 初始化alpha：维度只等于可达集大小，每个位置都是alpha_in_per_cell
+            alpha_in_per_cell = self.params.alpha_in / len(reachable)
+            self.agent_alphas[agent_id][timestep] = np.full(len(reachable), alpha_in_per_cell)
+
+    def update_with_softcount(self, agent_id: int, timestep: int, 
+                            historical_cells: List[int], lr: float = 1.0) -> None:
+        """使用历史数据更新优化的Dirichlet分布。
+        
+        Args:
+            agent_id: 智能体ID
+            timestep: 时间步
+            historical_cells: 历史观测的cell indices
+            lr: 学习率
+        """
+        if agent_id not in self.agent_alphas:
+            raise ValueError(f"Agent {agent_id} not initialized")
+        
+        if timestep not in self.agent_alphas[agent_id]:
+            raise ValueError(f"Timestep {timestep} not initialized for agent {agent_id}")
+        
+        reachable_cells = self.agent_reachable_sets[agent_id][timestep]
+        alpha = self.agent_alphas[agent_id][timestep]
+        
+        # 构建软计数：只对可达集内的历史数据计数
+        soft_count = np.zeros(len(reachable_cells))
+        for cell in historical_cells:
+            if cell in reachable_cells:
+                idx = reachable_cells.index(cell)  # 找到在可达集中的索引
+                soft_count[idx] += lr
+        
+        # 更新alpha参数
+        self.agent_alphas[agent_id][timestep] += soft_count
+
+    def sample_transition_distributions(self, agent_id: int, n_samples: int = 20) -> Dict[int, List[np.ndarray]]:
+        """采样多个transition分布组合。
+        
+        Returns:
+            {timestep: [prob_vector_1, prob_vector_2, ...]} 每个样本的概率分布
+        """
+        if agent_id not in self.agent_alphas:
+            raise ValueError(f"Agent {agent_id} not initialized")
+        
+        distributions = {}
+        for timestep in self.agent_alphas[agent_id]:
+            alpha = self.agent_alphas[agent_id][timestep]
+            samples = []
+            for _ in range(n_samples):
+                # 直接在可达集维度上采样
+                prob_vector = np.random.dirichlet(alpha)
+                samples.append(prob_vector)
+            distributions[timestep] = samples
+        
+        return distributions
+
+    def get_reachable_sets(self, agent_id: int) -> Dict[int, List[int]]:
+        """获取智能体的可达集。"""
+        if agent_id not in self.agent_reachable_sets:
+            raise ValueError(f"Agent {agent_id} not initialized")
+        return self.agent_reachable_sets[agent_id].copy()
+
+    def posterior_mean(self, agent_id: int, timestep: int) -> np.ndarray:
+        """计算智能体在指定时间步的后验均值概率（在完整K维空间中）。"""
+        if agent_id not in self.agent_alphas:
+            raise ValueError(f"Agent {agent_id} not initialized")
+        
+        if timestep not in self.agent_alphas[agent_id]:
+            raise ValueError(f"Timestep {timestep} not initialized for agent {agent_id}")
+        
+        # 获取可达集上的后验均值
+        alpha = self.agent_alphas[agent_id][timestep]
+        reachable_cells = self.agent_reachable_sets[agent_id][timestep]
+        prob_reachable = alpha / alpha.sum()
+        
+        # 映射到完整的K维空间
+        full_prob = np.zeros(self.K)
+        for i, cell in enumerate(reachable_cells):
+            full_prob[cell] = prob_reachable[i]
+        
+        return full_prob
+
+    def get_agent_alpha(self, agent_id: int, timestep: int) -> np.ndarray:
+        """获取智能体在指定时间步的alpha参数（兼容性方法）。"""
+        if agent_id not in self.agent_alphas:
+            raise ValueError(f"Agent {agent_id} not initialized")
+        
+        if timestep not in self.agent_alphas[agent_id]:
+            raise ValueError(f"Timestep {timestep} not initialized for agent {agent_id}")
+        
+        return self.agent_alphas[agent_id][timestep].copy()

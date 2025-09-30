@@ -23,27 +23,30 @@ class ScenarioManager:
     
     def create_scenario(self) -> WorldState:
         """创建固定的mock场景。"""
-        ego = EgoState(position_m=(0.0, 0.0), velocity_mps=(5.0, 0.0), yaw_rad=0.0)
+        ego = EgoState(position_m=(0.0, 0.0), velocity_mps=(2.0, 0.0), yaw_rad=0.0)
         
         # 确保智能体位置在网格范围内 [-grid_size_m/2, grid_size_m/2] = [-10, 10]
         # 修改智能体位置，让它们更接近自车轨迹，增加碰撞可能性
         agent1 = AgentState(
             agent_id="vehicle-1",
-            position_m=(10.0, 10.0),  # 更接近自车
-            velocity_mps=(4.0, 0.0),
-            heading_rad=0.0,
+            position_m=(10.0, 3.0),  # 更接近自车
+            velocity_mps=(2.0, 0.0),
+            heading_rad=0,
             agent_type=AgentType.VEHICLE
         )
         
         agent2 = AgentState(
             agent_id="pedestrian-1", 
-            position_m=(3.0, -5.0),  # 更接近自车
+            position_m=(3.0, -25.0),  
             velocity_mps=(0.8, 0.3),
             heading_rad=0.3,
             agent_type=AgentType.PEDESTRIAN
         )
         
-        return WorldState(time_s=0.0, ego=ego, agents=[agent1, agent2])
+        # 测试动态agent数量：可以选择只创建一个agent
+        # return WorldState(time_s=0.0, ego=ego, agents=[agent1, agent2])  # 两个agent
+        return WorldState(time_s=0.0, ego=ego, agents=[agent1])  # 只有一个agent
+        # return WorldState(time_s=0.0, ego=ego, agents=[])  # 没有agent
     
     def create_scenario_state(self, world: WorldState) -> ScenarioState:
         """从WorldState创建ScenarioState用于buffer索引"""

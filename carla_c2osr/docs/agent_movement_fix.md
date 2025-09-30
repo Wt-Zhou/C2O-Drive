@@ -130,3 +130,5 @@ if next_x < min_bound or next_x > max_bound or next_y < min_bound or next_y > ma
 
 这个修复确保了实验的可视化效果更加真实，环境车agent能够按照预期的轨迹移动，为C2OSR-Drive算法研究提供了正确的环境。
 
+
+

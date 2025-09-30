@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import List
+from typing import List, Dict
 import numpy as np
 import matplotlib.pyplot as plt
 import imageio
@@ -15,6 +15,8 @@ def grid_heatmap(
     grid_size_m: float = 20.0,
     reachable_sets: List[List[int]] | None = None,
     reachable_colors: List[str] | None = None,
+    multi_timestep_reachable_sets: Dict[int, Dict[int, List[int]]] | None = None,
+    historical_data_sets: Dict[int, Dict[int, List[int]]] | None = None,
 ) -> None:
     """渲染概率热力图并叠加轨迹点。
     
@@ -26,6 +28,10 @@ def grid_heatmap(
         title: 图表标题
         out_path: 输出PNG路径
         grid_size_m: 网格物理尺寸
+        reachable_sets: 当前时刻可达集 (向后兼容)
+        reachable_colors: 可达集颜色 (向后兼容)
+        multi_timestep_reachable_sets: 多时间步可达集 {agent_id: {timestep: [cell_indices]}}
+        historical_data_sets: 历史轨迹数据 {agent_id: {timestep: [cell_indices]}}
     """
     assert prob.shape[0] == N * N, f"prob shape {prob.shape} != N*N={N*N}"
     
@@ -54,8 +60,124 @@ def grid_heatmap(
         ax.plot(agent_xy[0], agent_xy[1], 'o', color=color, markersize=8, 
                 markeredgewidth=1, markeredgecolor='white', label=f'Agent{i+1}')
 
-    # 可选：叠加当前时刻可达集（方框轮廓，不遮挡热力图）
-    if reachable_sets is not None and len(reachable_sets) > 0:
+    # 优先使用多时间步可达集，否则回退到单时间步可达集
+    if multi_timestep_reachable_sets is not None:
+        # 绘制多时间步可达集
+        cell_m = grid_size_m / float(N)
+        x0 = -half_size + cell_m * 0.5
+        y0 = -half_size + cell_m * 0.5
+        
+        # 为不同时间步定义不同的颜色和样式
+        timestep_colors = [
+            '#FF0000',  # 红色 - t1 (最近)
+            '#FF8000',  # 橙色 - t2
+            '#FFFF00',  # 黄色 - t3
+            '#00FF00',  # 绿色 - t4
+            '#00FFFF',  # 青色 - t5
+            '#0080FF',  # 蓝色 - t6
+            '#8000FF',  # 紫色 - t7
+            '#FF00FF',  # 洋红 - t8+
+        ]
+        
+        timestep_styles = [
+            {'alpha': 0.9, 'linewidth': 2.5, 'suffix': 't1'},
+            {'alpha': 0.8, 'linewidth': 2.2, 'suffix': 't2'},
+            {'alpha': 0.7, 'linewidth': 2.0, 'suffix': 't3'},
+            {'alpha': 0.6, 'linewidth': 1.8, 'suffix': 't4'},
+            {'alpha': 0.5, 'linewidth': 1.6, 'suffix': 't5'},
+            {'alpha': 0.4, 'linewidth': 1.4, 'suffix': 't6'},
+            {'alpha': 0.3, 'linewidth': 1.2, 'suffix': 't7'},
+            {'alpha': 0.2, 'linewidth': 1.0, 'suffix': 't8+'},
+        ]
+        
+        # 基础颜色为每个agent（用于区分不同agent）
+        base_colors = ['cyan', 'magenta', 'lime', 'orange', 'red', 'blue']
+        
+        for agent_id, timestep_data in multi_timestep_reachable_sets.items():
+            base_color = base_colors[(agent_id - 1) % len(base_colors)]
+            
+            for timestep, reach_indices in timestep_data.items():
+                if not reach_indices:
+                    continue
+                
+                # 获取对应时间步的颜色和样式
+                color_idx = min(timestep - 1, len(timestep_colors) - 1)
+                style_idx = min(timestep - 1, len(timestep_styles) - 1)
+                
+                timestep_color = timestep_colors[color_idx]
+                style = timestep_styles[style_idx]
+                
+                xs = []
+                ys = []
+                for idx in reach_indices:
+                    iy = idx // N
+                    ix = idx % N
+                    xs.append(x0 + ix * cell_m)
+                    ys.append(y0 + iy * cell_m)
+                
+                # marker大小随时间步递减
+                base_size = max(5.0, (300.0 / N) ** 2)
+                marker_size = base_size * (1.0 - 0.1 * (timestep - 1))
+                
+                ax.scatter(
+                    xs,
+                    ys,
+                    marker='s',
+                    facecolors='none',
+                    edgecolors=timestep_color,  # 使用时间步颜色而不是agent基础颜色
+                    linewidths=style['linewidth'],
+                    alpha=style['alpha'],
+                    s=marker_size,
+                    label=f'A{agent_id}-{style["suffix"]}',
+                )
+    
+    # 绘制历史轨迹数据（黑色圆点）
+    if historical_data_sets is not None:
+        cell_m = grid_size_m / float(N)
+        x0 = -half_size + cell_m * 0.5
+        y0 = -half_size + cell_m * 0.5
+        
+        # 为不同时间步定义不同的透明度
+        historical_timestep_styles = [
+            {'alpha': 1.0, 'size': 40, 'suffix': 't1'},
+            {'alpha': 0.8, 'size': 35, 'suffix': 't2'},
+            {'alpha': 0.6, 'size': 30, 'suffix': 't3'},
+            {'alpha': 0.4, 'size': 25, 'suffix': 't4'},
+            {'alpha': 0.3, 'size': 20, 'suffix': 't5+'},
+        ]
+        
+        for agent_id, timestep_data in historical_data_sets.items():
+            for timestep, historical_cells in timestep_data.items():
+                if not historical_cells:
+                    continue
+                
+                # 获取对应时间步的样式
+                style_idx = min(timestep - 1, len(historical_timestep_styles) - 1)
+                style = historical_timestep_styles[style_idx]
+                
+                xs = []
+                ys = []
+                for idx in historical_cells:
+                    iy = idx // N
+                    ix = idx % N
+                    xs.append(x0 + ix * cell_m)
+                    ys.append(y0 + iy * cell_m)
+                
+                # 绘制黑色圆点表示历史数据
+                ax.scatter(
+                    xs,
+                    ys,
+                    marker='o',
+                    facecolors='black',
+                    edgecolors='white',
+                    linewidths=1.0,
+                    alpha=style['alpha'],
+                    s=style['size'],
+                    label=f'历史A{agent_id}-{style["suffix"]}',
+                )
+    
+    elif reachable_sets is not None and len(reachable_sets) > 0:
+        # 回退到原有的单时间步可达集绘制逻辑
         cell_m = grid_size_m / float(N)
         x0 = -half_size + cell_m * 0.5
         y0 = -half_size + cell_m * 0.5
@@ -113,8 +235,35 @@ def make_gif(frame_paths: List[str], out_path: str, fps: int = 2) -> None:
     
     images = []
     for path in frame_paths:
-        images.append(imageio.imread(path))
+        try:
+            img = imageio.imread(path)
+            images.append(img)
+        except Exception as e:
+            print(f"警告: 跳过损坏的图像 {path}: {e}")
+            continue
+    
+    if not images:
+        print("错误: 没有有效的图像可以生成GIF")
+        return
+    
+    # 检查所有图像是否具有相同的尺寸
+    first_shape = images[0].shape
+    valid_images = [images[0]]
+    
+    for i, img in enumerate(images[1:], 1):
+        if img.shape == first_shape:
+            valid_images.append(img)
+        else:
+            print(f"警告: 跳过尺寸不匹配的图像 {frame_paths[i]} (期望: {first_shape}, 实际: {img.shape})")
+    
+    if not valid_images:
+        print("错误: 没有尺寸一致的图像可以生成GIF")
+        return
     
     # 计算duration（毫秒）
     duration = int(1000 / fps)
-    imageio.mimsave(out_path, images, duration=duration, loop=0)
+    try:
+        imageio.mimsave(out_path, valid_images, duration=duration, loop=0)
+        print(f"GIF生成成功: {out_path} ({len(valid_images)}帧)")
+    except Exception as e:
+        print(f"GIF生成失败: {e}")

@@ -142,7 +142,7 @@ class SimpleTrajectoryGenerator:
     def generate_ego_trajectory(self, 
                                ego_mode: str, 
                                horizon: int, 
-                               ego_speed: float = 5.0) -> List[np.ndarray]:
+                               ego_speed: float = 3.0) -> List[np.ndarray]:
         """生成自车固定轨迹。
         
         Args:

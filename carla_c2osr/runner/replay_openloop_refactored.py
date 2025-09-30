@@ -23,17 +23,22 @@ if str(_repo_root) not in sys.path:
 
 from carla_c2osr.env.types import AgentState, EgoState, WorldState, AgentType
 from carla_c2osr.agents.c2osr.grid import GridSpec, GridMapper
-from carla_c2osr.agents.c2osr.spatial_dirichlet import DirichletParams, SpatialDirichletBank
+from carla_c2osr.agents.c2osr.spatial_dirichlet import DirichletParams, SpatialDirichletBank, MultiTimestepSpatialDirichletBank, OptimizedMultiTimestepSpatialDirichletBank
 from carla_c2osr.agents.c2osr.trajectory_buffer import TrajectoryBuffer, AgentTrajectoryData, ScenarioState
 from carla_c2osr.agents.c2osr.risk import compose_union_singlelayer
 from carla_c2osr.evaluation.vis import grid_heatmap, make_gif
+from carla_c2osr.evaluation.transition_visualizer import visualize_transition_distributions, visualize_dirichlet_distributions
 
 # 导入重构后的模块
 from carla_c2osr.evaluation.rewards import RewardCalculator, CollisionDetector
 from carla_c2osr.evaluation.q_evaluator import QEvaluator
 from carla_c2osr.evaluation.buffer_analyzer import BufferAnalyzer
+from carla_c2osr.evaluation.q_value_calculator import QValueCalculator, QValueConfig, RewardConfig
+from carla_c2osr.evaluation.q_distribution_tracker_simplified import QDistributionTracker
 from carla_c2osr.utils.simple_trajectory_generator import SimpleTrajectoryGenerator
+from carla_c2osr.utils.trajectory_generator import TrajectoryGenerator
 from carla_c2osr.utils.scenario_manager import ScenarioManager
+from carla_c2osr.config import get_global_config, update_dt, update_horizon, get_dt, get_horizon
 
 
 def setup_output_dirs(base_dir: str = "outputs/replay_experiment") -> Path:
@@ -54,11 +59,11 @@ def run_episode(episode_id: int,
                 rng: np.random.Generator, 
                 output_dir: Path, 
                 sigma: float,
-                vis_mode: str = "qmax",
                 q_evaluator: QEvaluator = None,
                 trajectory_generator: TrajectoryGenerator = None,
                 scenario_manager: ScenarioManager = None,
-                buffer_analyzer: BufferAnalyzer = None) -> Dict[str, Any]:
+                buffer_analyzer: BufferAnalyzer = None,
+                q_tracker: QDistributionTracker = None) -> Dict[str, Any]:
     """运行单个episode。"""
     
     # 初始化组件
@@ -124,84 +129,157 @@ def run_episode(episode_id: int,
         # 基于当前时刻状态创建ScenarioState（用于查询历史数据）
         current_scenario_state = scenario_manager.create_scenario_state(world_current)
         
-        # 计算每个智能体当前位置的下一时刻可达集
+        # 计算每个智能体当前位置的多时间步可达集
+        config = get_global_config()
         current_reachable = {}
+        multi_timestep_reachable = {}
         for i, agent in enumerate(world_current.agents):
             agent_id = i + 1
-            reachable = grid.successor_cells(agent, n_samples=50)
+            # 计算单时间步可达集（向后兼容）
+            reachable = grid.successor_cells(agent, n_samples=config.sampling.reachable_set_samples_legacy)
             current_reachable[agent_id] = reachable
+            # 计算多时间步可达集
+            multi_reachable = grid.multi_timestep_successor_cells(
+                agent, 
+                horizon=horizon, 
+                dt=config.time.dt, 
+                n_samples=config.sampling.reachable_set_samples
+            )
+            multi_timestep_reachable[agent_id] = multi_reachable
         
-        # 每个时刻重新初始化Dirichlet Bank，基于当前可达集和历史数据
+        # 使用新的Q值计算器进行Q值评估
+        if t == 0:  # 只在第一个时间步计算Q值
+            # 构造自车未来动作轨迹
+            ego_action_trajectory = []
+            for action_t in range(t, min(t + horizon, len(ego_trajectory))):
+                ego_action_trajectory.append(tuple(ego_trajectory[action_t]))
+            
+            print(f"    开始Q值计算: 自车动作序列长度={len(ego_action_trajectory)}")
+            
+            try:
+                # 创建Q值配置
+                q_config = QValueConfig.from_global_config()
+                
+                # 从全局配置获取奖励配置
+                global_config = get_global_config()
+                reward_config = RewardConfig(
+                    collision_penalty=global_config.reward.collision_penalty,
+                    collision_threshold=0.1,  # 保留这个参数，因为它不在全局配置中
+                    acceleration_penalty_weight=0.1,
+                    speed_reward_weight=global_config.reward.min_speed_reward,
+                    target_speed=5.0,  # 保留这个参数
+                    progress_reward_weight=global_config.reward.progress_reward,
+                    safe_distance=3.0  # 保留这个参数
+                )
+                
+                # 创建Q值计算器
+                q_calculator = QValueCalculator(q_config, reward_config)
+                
+                # 计算Q值（传入持久的Dirichlet Bank）
+                q_values, detailed_info = q_calculator.compute_q_value(
+                    current_world_state=world_current,
+                    ego_action_trajectory=ego_action_trajectory,
+                    trajectory_buffer=trajectory_buffer,
+                    grid=grid,
+                    bank=bank,  # 传入持久的Bank，确保学习累积
+                    rng=rng
+                )
+                
+                # 计算平均Q值用于显示
+                avg_q_value = np.mean(q_values)
+                print(f"    Q值计算结果: {avg_q_value:.2f}")
+                print(f"    所有Q值: {[f'{q:.2f}' for q in q_values]}")
+                print(f"    碰撞率: {detailed_info['reward_breakdown']['collision_rate']:.3f}")
+                print(f"    Q值标准差: {detailed_info['reward_breakdown']['q_value_std']:.2f}")
+                
+                # 动态显示所有agent的信息
+                for agent_id, agent_info in detailed_info.get('agent_info', {}).items():
+                    reachable_total = agent_info.get('reachable_cells_total', 0)
+                    historical_total = agent_info.get('historical_data_count', 0)
+                    print(f"    Agent {agent_id}: 可达集(总计)={reachable_total}, 历史数据={historical_total}")
+                
+                # 记录Q值分布数据
+                if q_tracker is not None:
+                    q_distribution = detailed_info['reward_breakdown']['all_q_values']
+                    collision_rate = detailed_info['reward_breakdown']['collision_rate']
+                    q_tracker.add_episode_data(
+                        episode_id=episode_id,
+                        q_value=avg_q_value,
+                        q_distribution=q_distribution,
+                        collision_rate=collision_rate,
+                        detailed_info=detailed_info
+                    )
+                
+                # 生成transition分布和Dirichlet分布可视化（仅在第一个时刻）
+                if t == 0:  # 只在第一个时刻生成可视化
+                    try:
+                        print(f"  🎨 生成transition分布和Dirichlet分布可视化...")
+                        
+                        # 获取transition分布数据（从Q值计算器内部获取）
+                        agent_transition_samples = q_calculator._build_agent_transition_distributions(
+                            world_current, ego_action_trajectory, trajectory_buffer, grid, bank, horizon
+                        )
+                        
+                        # 可视化transition分布
+                        visualize_transition_distributions(
+                            agent_transition_samples=agent_transition_samples,
+                            current_world_state=world_current,
+                            grid=grid,
+                            episode_idx=episode_id,
+                            output_dir=output_dir
+                        )
+                        
+                        # 可视化Dirichlet分布
+                        visualize_dirichlet_distributions(
+                            bank=bank,
+                            current_world_state=world_current,
+                            grid=grid,
+                            episode_idx=episode_id,
+                            output_dir=output_dir
+                        )
+                        
+                    except Exception as e:
+                        print(f"  ⚠️ 可视化生成失败: {e}")
+                        import traceback
+                        traceback.print_exc()
+                
+                # 打印每个智能体的信息
+                for agent_id, info in detailed_info['agent_info'].items():
+                    # reachable_cells_per_timestep的values已经是长度值（整数），不需要再调用len()
+                    total_reachable = sum(info['reachable_cells_per_timestep'].values())
+                    print(f"    Agent {agent_id}: 可达集(总计)={total_reachable}, "
+                          f"历史数据={info['total_historical_data']}")
+                    
+            except Exception as e:
+                print(f"    Q值计算失败: {e}")
+                # 即使Q值计算失败，也要记录失败信息
+                if q_tracker is not None:
+                    # 创建与成功情况相同长度的零分布
+                    config = get_global_config()
+                    n_samples = config.sampling.q_value_samples
+                    q_tracker.add_episode_data(
+                        episode_id=episode_id,
+                        q_value=0.0,
+                        q_distribution=[0.0] * n_samples,  # 保持一致的长度
+                        collision_rate=0.0,
+                        detailed_info={'error': str(e)}
+                    )
+        
+        # 为可视化初始化MultiTimestepSpatialDirichletBank
         for i, agent in enumerate(world_current.agents):
             agent_id = i + 1
             try:
-                # 获取当前位置的可达集
-                reachable = current_reachable[agent_id]
-                
-                if len(reachable) > 0:
-                    # 重新初始化该智能体的Dirichlet分布
-                    bank.init_agent(agent_id, reachable)
-                    
-                    # 获取历史转移数据（基于当前状态，timestep=0表示下一秒）
-                    # 使用模糊匹配获取相似状态下的历史数据
-                    historical_transitions = trajectory_buffer.get_agent_fuzzy_historical_transitions(
-                        current_scenario_state, agent_id, timestep=0,
-                        position_threshold=10.0,  # 位置阈值3米
-                        velocity_threshold=10.0,  # 速度阈值2m/s
-                        heading_threshold=3.14    # 朝向阈值0.8弧度（约45度）
-                    )
-                    
-                    # 如果有历史数据，计算软计数并更新alpha
-                    if len(historical_transitions) > 0:
-                        # 创建基于可达集的软计数
-                        w = np.zeros(grid.K, dtype=float)
-                        # 将历史转移数据加入软计数
-                        for hist_cell in historical_transitions:
-                            if hist_cell in reachable:
-                                w[hist_cell] += 1.0
-                        
-                        # 归一化到可达集
-                        if w.sum() > 0:
-                            w = w / w.sum()
-                            # 直接设置alpha（基于历史数据）
-                            bank.agent_alphas[agent_id] = bank.params.alpha_in * w
-                    
-                    print(f"    Agent {agent_id}: 历史={len(historical_transitions)}, "
-                          f"可达集={len(reachable)}")
-                    
-                    # Q值评估：从Dirichlet分布采样并计算reward
-                    if t < horizon - 1:  # 不是最后一步
-                        # 获取自车下一状态
-                        ego_next_world_xy = ego_trajectory[t + 1]
-                        ego_next = EgoState(position_m=tuple(ego_next_world_xy), velocity_mps=(5.0, 0.0), yaw_rad=0.0)
-                        
-                        # 计算自车轨迹的格子ID
-                        ego_trajectory_cells = []
-                        for future_t in range(t + 1, min(t + 3, horizon)):  # 看未来2步
-                            if future_t < len(ego_trajectory):
-                                ego_future_xy = ego_trajectory[future_t]
-                                ego_cell = grid.world_to_cell(tuple(ego_future_xy))
-                                ego_trajectory_cells.append(ego_cell)
-                        
-                        print(f"    Agent {agent_id} Q值评估:")
-                        rewards = q_evaluator.evaluate_q_values(
-                            bank=bank,
-                            agent_id=agent_id,
-                            reachable=reachable,
-                            ego_state=world_current.ego,
-                            ego_next_state=ego_next,
-                            agent_state=agent,
-                            grid=grid,
-                            ego_trajectory_cells=ego_trajectory_cells,
-                            n_samples=5,  # 采样5次
-                            rng=rng,
-                            verbose=True
-                        )
-                        
-                        # 计算平均reward
-                        avg_reward = np.mean(rewards)
-                        print(f"    Agent {agent_id} 平均reward: {avg_reward:.2f}")
-                
+                # 计算多时间步可达集用于初始化
+                agent_multi_reachable = grid.multi_timestep_successor_cells(
+                    agent, 
+                    horizon=len(ego_action_trajectory), 
+                    dt=config.time.dt, 
+                    n_samples=config.sampling.reachable_set_samples
+                )
+                if agent_multi_reachable and agent_id not in bank.agent_alphas:
+                    bank.init_agent(agent_id, agent_multi_reachable)
+                    total_reachable = sum(len(cells) for cells in agent_multi_reachable.values())
+                    print(f"    Agent {agent_id}: 多时间步可达集={total_reachable}")
             except Exception as e:
                 print(f"    错误: Agent {agent_id} 初始化失败: {e}")
                 continue
@@ -210,48 +288,100 @@ def run_episode(episode_id: int,
         # 这里根据vis_mode选择：
         # - qmax / pmean-*: 显示概率
         # - counts-agent1/2/avg: 显示计数（alpha - alpha_init）归一化到[0,1]
-        if vis_mode == "qmax":
-            p_plot = bank.conservative_qmax_union([1, 2])
-        elif vis_mode == "pmean-agent1":
-            p_plot = bank.posterior_mean(1)
-        elif vis_mode == "pmean-agent2":
-            p_plot = bank.posterior_mean(2)
-        elif vis_mode == "pmean-avg":
-            p_plot = 0.5 * (bank.posterior_mean(1) + bank.posterior_mean(2))
-        elif vis_mode == "counts-agent1":
-            # 使用Trajectory Buffer的计数（基于当前状态）
-            buffer_counts = buffer_analyzer.calculate_buffer_counts(current_scenario_state, [1], 0, grid)
-            c = buffer_counts[1]
-            p_plot = c / (np.max(c) + 1e-12)
-        elif vis_mode == "counts-agent2":
-            # 使用Trajectory Buffer的计数（基于当前状态）
-            buffer_counts = buffer_analyzer.calculate_buffer_counts(current_scenario_state, [2], 0, grid)
-            c = buffer_counts[2]
-            p_plot = c / (np.max(c) + 1e-12)
-        elif vis_mode == "counts-avg":
-            # 使用Trajectory Buffer的计数（基于当前状态）
-            buffer_counts = buffer_analyzer.calculate_buffer_counts(current_scenario_state, [1, 2], 0, grid)
-            c1 = buffer_counts[1]
-            c2 = buffer_counts[2]
-            # 叠加两个agent的计数，保持原始值
-            c = c1 + c2
-            p_plot = c / (np.max(c) + 1e-12)
-        elif vis_mode == "current-counts":
-            # 显示当前时刻状态下的历史transition计数
-            buffer_counts = buffer_analyzer.calculate_buffer_counts(current_scenario_state, [1, 2], 0, grid)
-            c1 = buffer_counts[1]
-            c2 = buffer_counts[2]
-            c = c1 + c2
-            p_plot = c / (np.max(c) + 1e-12)
-        elif vis_mode == "fuzzy-counts":
-            # 显示模糊匹配的历史transition计数
-            buffer_counts = buffer_analyzer.calculate_fuzzy_buffer_counts(current_scenario_state, [1, 2], 0, grid, 10, 10, 3.14)
-            c1 = buffer_counts[1]
-            c2 = buffer_counts[2]
-            c = c1 + c2
-            p_plot = c / (np.max(c) + 1e-12)
-        else:
-            p_plot = bank.conservative_qmax_union([1, 2])
+        # 简化的统一可视化模式：显示agent可达集、历史轨迹和自车未来轨迹
+        # 1. 构造自车未来动作轨迹
+        ego_action_trajectory = []
+        for action_t in range(t, min(t + horizon, len(ego_trajectory))):
+            ego_action_trajectory.append(tuple(ego_trajectory[action_t]))
+        
+        # 2. 获取历史轨迹数据
+        current_ego_state = (world_current.ego.position_m[0], world_current.ego.position_m[1], world_current.ego.yaw_rad)
+        current_agents_states = []
+        for agent in world_current.agents:
+            current_agents_states.append((agent.position_m[0], agent.position_m[1], 
+                                        agent.velocity_mps[0], agent.velocity_mps[1], 
+                                        agent.heading_rad, agent.agent_type.value))
+        
+        # 3. 初始化可视化数据
+        c = np.zeros(grid.spec.num_cells)
+        
+        print(f"    === t={t+1}: Agent可达集 + 历史轨迹 + 自车轨迹 ===")
+        
+        # 4. 处理每个Agent（与Q值计算完全对齐的可视化）
+        config = get_global_config()
+        multi_timestep_reachable = {}  # 收集所有agent的多时间步可达集
+        historical_data_sets = {}  # 收集所有agent的历史轨迹数据
+        
+        for i, agent in enumerate(world_current.agents):
+            agent_id = i + 1
+            
+            # 4a. 计算Agent的多时间步可达集（与Q值计算使用相同参数）
+            agent_multi_reachable = grid.multi_timestep_successor_cells(
+                agent, 
+                horizon=len(ego_action_trajectory), 
+                dt=config.time.dt, 
+                n_samples=config.sampling.reachable_set_samples
+            )
+            
+            if not agent_multi_reachable:
+                print(f"    Agent {agent_id} ({agent.agent_type.value}): 无法计算可达集")
+                continue
+            
+            # 保存到可视化数据结构
+            multi_timestep_reachable[agent_id] = agent_multi_reachable
+                
+            total_reachable = sum(len(cells) for cells in agent_multi_reachable.values())
+            print(f"    Agent {agent_id} ({agent.agent_type.value}): 未来{len(ego_action_trajectory)}步可达集={total_reachable}个单元")
+            
+            # 4b. 将多时间步可达集添加到可视化（按时间步分权重）
+            for timestep, reachable_cells in agent_multi_reachable.items():
+                # 时间步越远，权重越低
+                timestep_weight = 0.3 / (timestep + 1)  # t=0: 0.3, t=1: 0.15, t=2: 0.1...
+                for cell in reachable_cells:
+                    if 0 <= cell < grid.spec.num_cells:
+                        c[cell] += timestep_weight
+                print(f"      时间步{timestep}: {len(reachable_cells)}个可达单元 (权重: {timestep_weight:.2f})")
+            
+            # 4c. 获取Agent的历史轨迹数据（使用更宽松的阈值进行测试）
+            agent_historical_data = trajectory_buffer.get_agent_historical_transitions_strict_matching(
+                agent_id=agent_id,
+                current_ego_state=current_ego_state,
+                current_agents_states=current_agents_states,
+                ego_action_trajectory=ego_action_trajectory,
+                ego_state_threshold=5.0,    # 放宽自车状态阈值
+                agents_state_threshold=5.0, # 放宽环境智能体状态阈值
+                ego_action_threshold=5.0    # 放宽自车动作阈值
+            )
+            
+            # 保存历史数据到可视化数据结构（不再混入概率图）
+            historical_data_sets[agent_id] = agent_historical_data
+            
+            # 4d. 统计历史数据（与Q值计算相同的逻辑）
+            total_historical = sum(len(cells) for cells in agent_historical_data.values())
+            print(f"      历史轨迹数据: {total_historical}个位置")
+            
+            # 4e. 统计有效历史数据（与Q值计算逻辑一致）
+            for timestep, agent_cells in agent_historical_data.items():
+                if len(agent_cells) > 0 and timestep in agent_multi_reachable:
+                    # 只统计在可达集内的历史数据（与Q值计算逻辑一致）
+                    timestep_reachable = agent_multi_reachable[timestep]
+                    valid_historical_cells = [cell for cell in agent_cells if cell in timestep_reachable]
+                    
+                    if valid_historical_cells:
+                        print(f"        时间步{timestep}: {len(agent_cells)}个历史位置 -> {len(valid_historical_cells)}个有效位置")
+                    else:
+                        print(f"        时间步{timestep}: {len(agent_cells)}个历史位置 -> 0个有效位置（不在可达集内）")
+        
+        # 5. 将自车未来轨迹添加到可视化（高权重）
+        print(f"    自车未来轨迹: {len(ego_action_trajectory)}步")
+        for step_idx, ego_pos in enumerate(ego_action_trajectory):
+            ego_cell = grid.world_to_cell(ego_pos)
+            if 0 <= ego_cell < grid.spec.num_cells:
+                c[ego_cell] += 1.0  # 自车轨迹用高权重显示
+            print(f"      步骤{step_idx}: 位置{ego_pos} -> cell {ego_cell}")
+        
+        # 6. 归一化可视化数据
+        p_plot = c / (np.max(c) + 1e-12)
         
         # 转换坐标用于可视化（转换到网格坐标系）
         ego_grid = grid.to_grid_frame(world_current.ego.position_m)
@@ -262,10 +392,9 @@ def run_episode(episode_id: int,
         
         # 渲染热力图
         frame_path = ep_dir / f"t_{t+1:02d}.png"
-        title = f"Episode {episode_id+1}, t={t+1}s, vis={vis_mode}"
+        title = f"Episode {episode_id+1}, t={t+1}s: 可达集+历史轨迹+自车轨迹"
         try:
-            # 传入每个智能体的可达集以叠加轮廓
-            reachable_sets = [current_reachable.get(1, []), current_reachable.get(2, [])]
+            # 传入多时间步可达集数据和历史数据进行可视化
             grid_heatmap(
                 p_plot,
                 grid.N,
@@ -274,8 +403,8 @@ def run_episode(episode_id: int,
                 title,
                 str(frame_path),
                 grid.size_m,
-                reachable_sets=reachable_sets,
-                reachable_colors=["cyan", "magenta"],
+                multi_timestep_reachable_sets=multi_timestep_reachable,
+                historical_data_sets=historical_data_sets,
             )
             frame_paths.append(str(frame_path))
         except Exception as e:
@@ -283,12 +412,25 @@ def run_episode(episode_id: int,
             continue
         
         # 统计信息
+        # 动态获取所有已初始化的agent ID
+        initialized_agent_ids = list(bank.agent_alphas.keys()) if hasattr(bank, 'agent_alphas') else []
+        
+        # 计算Alpha总和（兼容不同的Bank类型）
+        if isinstance(bank, (MultiTimestepSpatialDirichletBank, OptimizedMultiTimestepSpatialDirichletBank)):
+            alpha_sum = 0.0
+            for aid in initialized_agent_ids:
+                if aid in bank.agent_alphas:
+                    alpha_sum += sum(alpha.sum() for alpha in bank.agent_alphas[aid].values())
+        else:
+            # 对于旧版本的单时间步Bank
+            alpha_sum = sum(bank.get_agent_alpha(aid).sum() for aid in initialized_agent_ids)
+        
         stats = {
             't': t + 1,
-            'alpha_sum': sum(bank.get_agent_alpha(aid).sum() for aid in [1, 2]),
+            'alpha_sum': alpha_sum,
             'qmax_max': float(np.max(p_plot)),
             'nz_cells': int(np.count_nonzero(p_plot > 1e-6)),
-            'reachable_cells': {aid: len(current_reachable[aid]) for aid in [1, 2]}
+            'reachable_cells': {aid: len(current_reachable[aid]) for aid in current_reachable.keys()}
         }
         episode_stats.append(stats)
     
@@ -328,8 +470,9 @@ def run_episode(episode_id: int,
         
         timestep_scenarios.append((current_scenario_state, timestep_trajectory_data))
     
-    # 存储按时间步组织的数据
-    trajectory_buffer.store_episode_trajectories_by_timestep(episode_id, timestep_scenarios)
+    # 存储按时间步组织的数据，传入自车轨迹
+    ego_trajectory_tuples = [tuple(pos) for pos in ego_trajectory]
+    trajectory_buffer.store_episode_trajectories_by_timestep(episode_id, timestep_scenarios, ego_trajectory_tuples)
     
     return {
         'episode_id': episode_id,
@@ -341,37 +484,63 @@ def run_episode(episode_id: int,
 
 def main():
     parser = argparse.ArgumentParser(description="多次场景执行的概率热力图可视化（重构版）")
-    parser.add_argument("--episodes", type=int, default=10, help="执行episode数")
-    parser.add_argument("--horizon", type=int, default=8, help="每个episode时长")
+    # 基本运行参数
+    parser.add_argument("--episodes", type=int, default=20, help="执行episode数")
     parser.add_argument("--seed", type=int, default=2025, help="随机种子")
     parser.add_argument("--gif-fps", type=int, default=2, help="GIF帧率")
     parser.add_argument("--ego-mode", choices=["straight", "fixed-traj"], 
                        default="straight", help="自车运动模式")
     parser.add_argument("--sigma", type=float, default=0.5, help="软计数核宽度")
-    parser.add_argument(
-        "--vis-mode",
-        choices=[
-            "qmax",
-            "pmean-agent1", "pmean-agent2", "pmean-avg",
-            "counts-agent1", "counts-agent2", "counts-avg",
-            "current-counts",
-            "fuzzy-counts"
-        ],
-        default="qmax",
-        help=(
-            "可视化模式：qmax(保守并集上界)；pmean-* 为后验均值；"
-            "counts-* 为计数(α-α_prior)归一化；"
-            "current-counts为当前状态下的历史transition计数；"
-            "fuzzy-counts为模糊匹配的历史transition计数"
-        )
-    )
+    
+    # 配置预设参数（主要配置方式）
+    parser.add_argument("--config-preset", choices=["default", "fast", "high-precision", "long-horizon"],
+                       default="default", help="预设配置模板")
+    
+    # 可选覆盖参数（仅在需要时使用，不设置默认值避免覆盖预设配置）
+    parser.add_argument("--dt", type=float, help="覆盖时间步长（秒）")
+    parser.add_argument("--horizon", type=int, help="覆盖预测时间步数")
+    parser.add_argument("--reachable-samples", type=int, help="覆盖可达集采样数量")
+    parser.add_argument("--q-samples", type=int, help="覆盖Q值采样数量")
+    # 已简化为单一可视化模式，不再需要vis-mode参数
     
     args = parser.parse_args()
     
+    # 设置全局配置
+    from carla_c2osr.config import ConfigPresets, set_global_config
+    
+    # 首先应用预设配置
+    if args.config_preset == "fast":
+        config = ConfigPresets.fast_testing()
+    elif args.config_preset == "high-precision":
+        config = ConfigPresets.high_precision()
+    elif args.config_preset == "long-horizon":
+        config = ConfigPresets.long_horizon()
+    else:
+        config = get_global_config()
+    
+    # 仅在用户明确指定时才覆盖预设配置
+    if args.dt is not None:
+        config.time.dt = args.dt
+    if args.horizon is not None:
+        config.time.default_horizon = args.horizon
+    if args.reachable_samples is not None:
+        config.sampling.reachable_set_samples = args.reachable_samples
+    if args.q_samples is not None:
+        config.sampling.q_value_samples = args.q_samples
+    
+    # 这些参数总是从命令行获取（因为它们不是预设配置的一部分）
+    config.random_seed = args.seed
+    config.visualization.gif_fps = args.gif_fps
+    
+    set_global_config(config)
+    
     print(f"=== 多场景贝叶斯学习可视化（重构版）===")
-    print(f"Episodes: {args.episodes}, Horizon: {args.horizon}")
+    print(f"Episodes: {args.episodes}, Horizon: {config.time.default_horizon}")
     print(f"Ego mode: {args.ego_mode}, Sigma: {args.sigma}")
     print(f"Seed: {args.seed}")
+    print(f"配置预设: {args.config_preset}")
+    print(f"时间步长: {config.time.dt}s, 预测时间: {config.time.horizon_seconds:.1f}s")
+    print(f"可达集采样: {config.sampling.reachable_set_samples}, Q值采样: {config.sampling.q_value_samples}")
     
     # 设置随机种子
     np.random.seed(args.seed)
@@ -392,29 +561,39 @@ def main():
     scenario_state = scenario_manager.create_scenario_state(world_init)
     
     dirichlet_params = DirichletParams(alpha_in=30.0, alpha_out=1e-6, delta=0.05, cK=1.0)
-    bank = SpatialDirichletBank(grid.K, dirichlet_params)
+    # 使用终极优化版本的Bank - 支持直接期望计算，零采样
+    bank = OptimizedMultiTimestepSpatialDirichletBank(grid.K, dirichlet_params, horizon=config.time.default_horizon)
+    print(f"🚀 使用终极优化版本的Dirichlet Bank - 维度自适应，零采样计算")
     
     # 初始化轨迹缓冲区
-    trajectory_buffer = TrajectoryBuffer()
+    trajectory_buffer = TrajectoryBuffer(horizon=config.time.default_horizon)
     
     # 初始化评估器和分析器
     q_evaluator = QEvaluator()
     buffer_analyzer = BufferAnalyzer(trajectory_buffer)
+    q_tracker = QDistributionTracker()  # 创建Q值分布跟踪器
     
     # 生成自车轨迹
-    ego_trajectory = trajectory_generator.generate_ego_trajectory(args.ego_mode, args.horizon)
+    ego_trajectory = trajectory_generator.generate_ego_trajectory(args.ego_mode, config.time.default_horizon)
     
     # 只对环境智能体初始化Dirichlet分布（不包括自车）
     for i, agent in enumerate(world_init.agents):
         agent_id = i + 1
-        # 使用初始位置计算下一步可达集进行初始化
-        reachable = grid.successor_cells(agent, n_samples=100)
-        if len(reachable) == 0:
-            # 如果没有可达集，添加当前位置作为可达
+        # 使用多时间步可达集进行初始化（适配优化版Bank）
+        multi_reachable = grid.multi_timestep_successor_cells(
+            agent, 
+            horizon=config.time.default_horizon, 
+            dt=config.time.dt, 
+            n_samples=100
+        )
+        if not multi_reachable:
+            # 如果没有可达集，为每个时间步添加当前位置作为可达
             current_cell = grid.world_to_cell(agent.position_m)
-            reachable = [current_cell]
-        bank.init_agent(agent_id, reachable)
-        print(f"Agent {agent_id} ({agent.agent_type.value}): 初始可达集 {len(reachable)} cells")
+            multi_reachable = {t: [current_cell] for t in range(1, config.time.default_horizon + 1)}
+        
+        bank.init_agent(agent_id, multi_reachable)
+        total_cells = sum(len(cells) for cells in multi_reachable.values())
+        print(f"Agent {agent_id} ({agent.agent_type.value}): 多时间步可达集 {total_cells} cells总计")
     
     # 设置输出目录
     output_dir = setup_output_dirs()
@@ -429,13 +608,13 @@ def main():
             
             print(f"\nRunning Episode {e+1}/{args.episodes}")
             episode_result = run_episode(
-                e, args.horizon, ego_trajectory, world_init, grid, bank,
+                e, config.time.default_horizon, ego_trajectory, world_init, grid, bank,
                 trajectory_buffer, scenario_state, rng, output_dir, args.sigma,
-                vis_mode=args.vis_mode,
                 q_evaluator=q_evaluator,
                 trajectory_generator=trajectory_generator,
                 scenario_manager=scenario_manager,
-                buffer_analyzer=buffer_analyzer
+                buffer_analyzer=buffer_analyzer,
+                q_tracker=q_tracker
             )
             all_episodes.append(episode_result)
             
@@ -446,12 +625,18 @@ def main():
             # 打印episode统计
             if episode_result['stats']:
                 final_stats = episode_result['stats'][-1]
-                reachable_info = ", ".join([f"Agent{aid}={final_stats['reachable_cells'][aid]}" 
-                                           for aid in final_stats['reachable_cells']])
-                print(f"  Final: alpha_sum={final_stats['alpha_sum']:.1f}, "
-                      f"qmax_max={final_stats['qmax_max']:.4f}, "
-                      f"nz_cells={final_stats['nz_cells']}, "
-                      f"可达集: {reachable_info}")
+                # 动态获取所有agent的可达集信息
+                if 'reachable_cells' in final_stats:
+                    reachable_info = ", ".join([f"Agent{aid}={final_stats['reachable_cells'][aid]}" 
+                                               for aid in final_stats['reachable_cells']])
+                    print(f"  Final: alpha_sum={final_stats['alpha_sum']:.1f}, "
+                          f"qmax_max={final_stats['qmax_max']:.4f}, "
+                          f"nz_cells={final_stats['nz_cells']}, "
+                          f"可达集: {reachable_info}")
+                else:
+                    print(f"  Final: alpha_sum={final_stats['alpha_sum']:.1f}, "
+                          f"qmax_max={final_stats['qmax_max']:.4f}, "
+                          f"nz_cells={final_stats['nz_cells']}")
             
             # 每10个episode清理一次matplotlib内存
             if (e + 1) % 10 == 0:
@@ -459,8 +644,8 @@ def main():
                 plt.close('all')
                 print(f"  内存清理: Episode {e+1}")
                 
-        except Exception as e:
-            print(f"Episode {e+1} 执行失败: {str(e)}")
+        except Exception as ex:
+            print(f"Episode {e+1} 执行失败: {ex}")
             print("继续执行下一个episode...")
             continue
     
@@ -484,9 +669,45 @@ def main():
     # 打印轨迹buffer统计
     buffer_stats = buffer_analyzer.get_buffer_stats()
     print(f"\n轨迹Buffer统计:")
-    print(f"  场景数: {buffer_stats['total_scenarios']}")
+    print(f"  Agent数: {buffer_stats['total_agents']}")
     print(f"  Episode数: {buffer_stats['total_episodes']}")
-    print(f"  总轨迹数: {buffer_stats['total_trajectories']}")
+    print(f"  Agent Episodes: {buffer_stats['total_agent_episodes']}")
+    print(f"  索引统计 - Agent数量索引: {buffer_stats['agent_count_index_size']}")
+    print(f"  索引统计 - 空间索引: {buffer_stats['spatial_index_size']}")
+    print(f"  索引统计 - 动作索引: {buffer_stats['action_index_size']}")
+    
+    # 生成Q值分布可视化
+    if len(q_tracker.q_value_history) > 0:
+        print(f"\n=== Q值分布分析 ===")
+        
+        # 打印统计摘要
+        q_tracker.print_summary()
+        
+        # 生成可视化图表
+        q_evolution_path = output_dir / "q_distribution_evolution.png"
+        q_boxplot_path = output_dir / "q_distribution_boxplot.png"
+        q_data_path = output_dir / "q_distribution_data.json"
+        
+        try:
+            # 生成Q值分布演化图（所有Q值随episode变化）
+            q_tracker.plot_q_distribution_evolution(str(q_evolution_path))
+            
+            # 生成碰撞率变化图
+            collision_rate_path = output_dir / "collision_rate_evolution.png"
+            q_tracker.plot_collision_rate_evolution(str(collision_rate_path))
+            
+            # 保存数据
+            q_tracker.save_data(str(q_data_path))
+            
+            print(f"\nQ值分布可视化已生成:")
+            print(f"  Q值演化图: {q_evolution_path.name}")
+            print(f"  碰撞率变化图: {collision_rate_path.name}")
+            print(f"  数据文件: {q_data_path.name}")
+            
+        except Exception as e:
+            print(f"Q值分布可视化生成失败: {e}")
+    else:
+        print(f"\n警告: 没有有效的Q值数据进行可视化")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Tuple, List
+from typing import Tuple, List, Dict, Optional
 import numpy as np
 import math
 
@@ -338,3 +338,153 @@ class GridMapper:
             world_coords[:, 0] += center_x
             world_coords[:, 1] += center_y
             return world_coords
+    
+    def multi_timestep_successor_cells(self, agent: AgentState, horizon: int = 3, 
+                                     dt: float = 0.2, n_samples: int = 200) -> Dict[int, List[int]]:
+        """计算智能体在未来多个时刻的可达网格单元集合。
+        
+        Args:
+            agent: 智能体当前状态
+            horizon: 预测时间步数
+            dt: 时间步长，默认 0.2 秒
+            n_samples: 采样数量，默认 200
+            
+        Returns:
+            {timestep: [reachable_cell_indices]} 每个时刻的可达集
+        """
+        # 获取智能体动力学参数
+        dynamics = AgentDynamicsParams.for_agent_type(agent.agent_type)
+        
+        current_pos = agent.position_m
+        current_vel = agent.velocity_mps
+        current_heading = agent.heading_rad
+        current_speed = math.sqrt(current_vel[0]**2 + current_vel[1]**2)
+        
+        # 为每个时间步计算可达集
+        reachable_sets = {}
+        
+        for timestep in range(1, horizon + 1):
+            reachable_indices = set()
+            
+            # 多次采样以获得更精确的可达集
+            for _ in range(n_samples):
+                # 模拟从当前状态到指定时间步的轨迹
+                final_pos = self._simulate_trajectory_to_timestep(
+                    current_pos, current_vel, current_heading, current_speed,
+                    dynamics, agent.agent_type, dt, timestep
+                )
+                
+                if final_pos is not None:
+                    # 转换到网格索引
+                    xy_grid = self.to_grid_frame(final_pos)
+                    idx = self.xy_to_index(xy_grid)
+                    reachable_indices.add(idx)
+            
+            # 添加当前位置（静止情况）
+            current_grid = self.to_grid_frame(current_pos)
+            current_idx = self.xy_to_index(current_grid)
+            reachable_indices.add(current_idx)
+            
+            reachable_sets[timestep] = list(reachable_indices)
+        
+        return reachable_sets
+    
+    def _simulate_trajectory_to_timestep(self, start_pos: Tuple[float, float],
+                                       start_vel: Tuple[float, float], 
+                                       start_heading: float,
+                                       start_speed: float,
+                                       dynamics: AgentDynamicsParams,
+                                       agent_type: AgentType,
+                                       dt: float,
+                                       target_timestep: int) -> Optional[Tuple[float, float]]:
+        """模拟智能体轨迹到指定时间步"""
+        pos = np.array(start_pos)
+        vel = np.array(start_vel)
+        heading = start_heading
+        speed = start_speed
+        
+        for step in range(target_timestep):
+            # 采样控制输入并执行一步
+            if agent_type == AgentType.PEDESTRIAN:
+                pos, vel, heading, speed = self._pedestrian_dynamics_step(
+                    pos, vel, heading, speed, dynamics, dt
+                )
+            else:
+                pos, vel, heading, speed = self._vehicle_dynamics_step(
+                    pos, vel, heading, speed, dynamics, dt
+                )
+        
+        return tuple(pos)
+    
+    def _pedestrian_dynamics_step(self, pos, vel, heading, speed, dynamics, dt):
+        """行人动力学单步模拟"""
+        # 采样加速度方向和大小
+        accel_angle = np.random.uniform(0, 2 * np.pi)
+        
+        if np.random.random() < 0.7:  # 70% 概率加速
+            accel_mag = np.random.uniform(0, dynamics.max_accel_mps2)
+        else:  # 30% 概率减速
+            accel_mag = np.random.uniform(-dynamics.max_decel_mps2, 0)
+        
+        # 计算加速度分量
+        accel_x = accel_mag * math.cos(accel_angle)
+        accel_y = accel_mag * math.sin(accel_angle)
+        
+        # 更新速度
+        new_vel_x = vel[0] + accel_x * dt
+        new_vel_y = vel[1] + accel_y * dt
+        
+        # 限制速度
+        new_speed = math.sqrt(new_vel_x**2 + new_vel_y**2)
+        if new_speed > dynamics.max_speed_mps:
+            scale = dynamics.max_speed_mps / new_speed
+            new_vel_x *= scale
+            new_vel_y *= scale
+            new_speed = dynamics.max_speed_mps
+        
+        # 更新位置
+        new_pos_x = pos[0] + new_vel_x * dt
+        new_pos_y = pos[1] + new_vel_y * dt
+        
+        new_heading = math.atan2(new_vel_y, new_vel_x)
+        
+        return np.array([new_pos_x, new_pos_y]), np.array([new_vel_x, new_vel_y]), new_heading, new_speed
+    
+    def _vehicle_dynamics_step(self, pos, vel, heading, speed, dynamics, dt):
+        """车辆动力学单步模拟"""
+        # 采样控制输入
+        if np.random.random() < 0.6:  # 60% 概率加速或保持
+            accel = np.random.uniform(-0.5, dynamics.max_accel_mps2)
+        else:  # 40% 概率减速
+            accel = np.random.uniform(-dynamics.max_decel_mps2, 0)
+        
+        # 转向角
+        if dynamics.wheelbase_m > 0:
+            max_steer_rad = math.atan(dynamics.max_yaw_rate_rps * dynamics.wheelbase_m / max(speed, 0.1))
+            max_steer_rad = min(max_steer_rad, math.pi / 6)  # 限制最大 30 度
+        else:
+            max_steer_rad = dynamics.max_yaw_rate_rps * dt
+        
+        steer_angle = np.random.uniform(-max_steer_rad, max_steer_rad)
+        
+        # 自行车模型积分
+        new_speed = max(0, speed + accel * dt)
+        new_speed = min(new_speed, dynamics.max_speed_mps)
+        
+        if dynamics.wheelbase_m > 0:
+            yaw_rate = new_speed * math.tan(steer_angle) / dynamics.wheelbase_m
+        else:
+            yaw_rate = steer_angle / dt
+        
+        yaw_rate = np.clip(yaw_rate, -dynamics.max_yaw_rate_rps, dynamics.max_yaw_rate_rps)
+        new_heading = heading + yaw_rate * dt
+        
+        # 位置积分
+        avg_heading = heading + 0.5 * yaw_rate * dt
+        new_pos_x = pos[0] + new_speed * math.cos(avg_heading) * dt
+        new_pos_y = pos[1] + new_speed * math.sin(avg_heading) * dt
+        
+        new_vel_x = new_speed * math.cos(new_heading)
+        new_vel_y = new_speed * math.sin(new_heading)
+        
+        return np.array([new_pos_x, new_pos_y]), np.array([new_vel_x, new_vel_y]), new_heading, new_speed

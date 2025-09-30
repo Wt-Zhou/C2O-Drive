@@ -1,8 +1,0 @@
-# CARLA 场景占位（不安装 CARLA 时用于标注参数）
-scenarios:
-  - town: Town03
-    weather: ClearNoon
-    seed: 42
-  - town: Town05
-    weather: WetNoon
-    seed: 7

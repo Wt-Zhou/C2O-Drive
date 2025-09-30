@@ -64,17 +64,17 @@ class TrajectoryGenerator:
             else:  # 车辆类型
                 # 车辆：更平滑的运动，遵循道路行为
                 # 使用更平滑的转向策略
-                if t % 12 == 0:  # 每12秒轻微调整（进一步减少频率）
-                    # 非常轻微的转向（阿克曼约束）
-                    max_steer = math.atan(dynamics.max_yaw_rate_rps * dynamics.wheelbase_m / max(current_speed, 0.1))
-                    max_steer = min(max_steer, math.pi / 48)  # 最大3.75度（进一步减小）
-                    steer_change = np.random.uniform(-max_steer, max_steer)
-                    yaw_rate = current_speed * math.tan(steer_change) / dynamics.wheelbase_m
-                    current_heading += yaw_rate * dt
+                # if t % 12 == 0:  # 每12秒轻微调整（进一步减少频率）
+                #     # 非常轻微的转向（阿克曼约束）
+                #     max_steer = math.atan(dynamics.max_yaw_rate_rps * dynamics.wheelbase_m / max(current_speed, 0.1))
+                #     max_steer = min(max_steer, math.pi / 48)  # 最大3.75度（进一步减小）
+                #     steer_change = np.random.uniform(-max_steer, max_steer)
+                #     yaw_rate = current_speed * math.tan(steer_change) / dynamics.wheelbase_m
+                #     current_heading += yaw_rate * dt
                     
-                    # 速度调整 - 更小的加速度变化
-                    accel_change = np.random.uniform(-0.2, 0.5)  # 进一步减小加速度范围
-                    current_speed = np.clip(current_speed + accel_change * dt, 0.5, dynamics.max_speed_mps)
+                #     # 速度调整 - 更小的加速度变化
+                #     accel_change = np.random.uniform(-0.2, 0.5)  # 进一步减小加速度范围
+                #     current_speed = np.clip(current_speed + accel_change * dt, 0.5, dynamics.max_speed_mps)
                 
                 # 计算下一位置
                 next_x = current_pos[0] + current_speed * math.cos(current_heading) * dt
