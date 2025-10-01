@@ -54,8 +54,8 @@ def visualize_transition_distributions(
             reachable_cells = reachable_sets[timestep]
             timestep_distributions = distributions[timestep]  # List[np.ndarray]
             
-            # 创建该时间步的可视化
-            _create_timestep_transition_visualization(
+            # 使用网格布局显示多个样本
+            _create_grid_transition_visualization(
                 timestep_distributions=timestep_distributions,
                 reachable_cells=reachable_cells,
                 agent_grid_pos=agent_grid_pos,
@@ -64,9 +64,73 @@ def visualize_transition_distributions(
                 N=N,
                 timestep=timestep,
                 agent_id=agent_id,
-                output_path=os.path.join(transition_dir, f"agent_{agent_id}_timestep_{timestep}.png"),
-                grid_size_m=grid_size_m
+                output_path=os.path.join(transition_dir, f"agent_{agent_id}_timestep_{timestep}_grid.png"),
+                grid_size_m=grid_size_m,
+                max_samples=25  # 最多显示25个样本
             )
+
+
+def _create_single_transition_visualization(
+    sample_distribution: np.ndarray,
+    reachable_cells: List[int],
+    agent_grid_pos: np.ndarray,
+    ego_grid_pos: np.ndarray,
+    N: int,
+    timestep: int,
+    agent_id: int,
+    sample_idx: int,
+    output_path: str,
+    grid_size_m: float = 20.0
+) -> None:
+    """为单个transition样本创建可视化"""
+    
+    if len(sample_distribution) == 0:
+        return
+    
+    fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+    
+    # 坐标转换
+    half_size = grid_size_m / 2
+    extent = [-half_size, half_size, -half_size, half_size]
+    cell_m = grid_size_m / float(N)
+    x0 = -half_size + cell_m * 0.5
+    y0 = -half_size + cell_m * 0.5
+    
+    # 创建概率网格
+    prob_grid = np.zeros(N * N)
+    for i, cell_idx in enumerate(reachable_cells):
+        if i < len(sample_distribution):
+            prob_grid[cell_idx] = sample_distribution[i]
+    
+    prob_grid_2d = prob_grid.reshape(N, N)
+    
+    # 使用hot颜色映射
+    im = ax.imshow(prob_grid_2d, origin='lower', cmap='hot', 
+                   vmin=0, vmax=np.max(sample_distribution), extent=extent)
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
+    ax.set_aspect('equal', adjustable='box')
+    
+    # 标记agent和ego位置
+    agent_x = x0 + agent_grid_pos[0] * cell_m
+    agent_y = y0 + agent_grid_pos[1] * cell_m
+    ax.plot(agent_x, agent_y, 'r*', markersize=15, markeredgewidth=2, 
+           markeredgecolor='white', label='Agent', zorder=10)
+    
+    ego_x = x0 + ego_grid_pos[0] * cell_m
+    ego_y = y0 + ego_grid_pos[1] * cell_m
+    ax.plot(ego_x, ego_y, 'w^', markersize=12, markeredgewidth=2, 
+           markeredgecolor='black', label='Ego', zorder=10)
+    
+    ax.set_title(f'Transition Probability - Sample {sample_idx}\nMax: {np.max(sample_distribution):.3f}, Mean: {np.mean(sample_distribution):.3f}')
+    ax.set_xlabel('X (m)')
+    ax.set_ylabel('Y (m)')
+    ax.legend()
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='Probability')
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
 
 
 def _create_timestep_transition_visualization(
@@ -120,34 +184,25 @@ def _create_timestep_transition_visualization(
     
     avg_prob_grid_2d = avg_prob_grid.reshape(N, N)
     
-    im1 = ax1.imshow(avg_prob_grid_2d, origin='lower', cmap='viridis', 
+    # 使用更好的颜色映射，让概率分布更清晰
+    im1 = ax1.imshow(avg_prob_grid_2d, origin='lower', cmap='hot', 
                     vmin=0, vmax=np.max(avg_prob_vector), extent=extent)
     ax1.set_xlim(extent[0], extent[1])
     ax1.set_ylim(extent[2], extent[3])
     ax1.set_aspect('equal', adjustable='box')
     
-    # 标记agent和ego位置
+    # 不显示可达集边界，只显示概率分布
+    
+    # 标记agent和ego位置（使用更明显的标记）
     agent_x = x0 + agent_grid_pos[0] * cell_m
     agent_y = y0 + agent_grid_pos[1] * cell_m
-    ax1.plot(agent_x, agent_y, 'ro', markersize=10, markeredgewidth=2, 
-            markeredgecolor='white', label='Agent')
+    ax1.plot(agent_x, agent_y, 'r*', markersize=15, markeredgewidth=2, 
+            markeredgecolor='white', label='Agent', zorder=10)
     
     ego_x = x0 + ego_grid_pos[0] * cell_m
     ego_y = y0 + ego_grid_pos[1] * cell_m
-    ax1.plot(ego_x, ego_y, 'ko', markersize=10, markeredgewidth=2, 
-            markeredgecolor='white', label='Ego')
-    
-    # 绘制可达集边界
-    reachable_xs = []
-    reachable_ys = []
-    for cell_idx in reachable_cells:
-        iy = cell_idx // N
-        ix = cell_idx % N
-        reachable_xs.append(x0 + ix * cell_m)
-        reachable_ys.append(y0 + iy * cell_m)
-    
-    ax1.scatter(reachable_xs, reachable_ys, marker='s', facecolors='none', 
-               edgecolors='red', linewidths=1.0, s=20, alpha=0.7)
+    ax1.plot(ego_x, ego_y, 'w^', markersize=12, markeredgewidth=2, 
+            markeredgecolor='black', label='Ego', zorder=10)
     
     ax1.set_title(f'Average Transition Probability\nMax: {np.max(avg_prob_vector):.3f}, Mean: {np.mean(avg_prob_vector):.3f}')
     ax1.set_xlabel('X (m)')
@@ -288,17 +343,7 @@ def _create_timestep_dirichlet_visualization(
     ax1.plot(ego_x, ego_y, 'ko', markersize=10, markeredgewidth=2, 
             markeredgecolor='white', label='Ego')
     
-    # 绘制可达集边界
-    reachable_xs = []
-    reachable_ys = []
-    for cell_idx in reachable_cells:
-        iy = cell_idx // N
-        ix = cell_idx % N
-        reachable_xs.append(x0 + ix * cell_m)
-        reachable_ys.append(y0 + iy * cell_m)
-    
-    ax1.scatter(reachable_xs, reachable_ys, marker='s', facecolors='none', 
-               edgecolors='red', linewidths=1.0, s=20, alpha=0.7)
+    # 不显示可达集边界，只显示alpha值分布
     
     ax1.set_title(f'Alpha Values\nMax: {np.max(alpha_vector):.2f}, Sum: {np.sum(alpha_vector):.2f}')
     ax1.set_xlabel('X (m)')
@@ -323,3 +368,88 @@ def _create_timestep_dirichlet_visualization(
     plt.close()
     
     print(f"  📊 Dirichlet分布可视化已保存: {output_path}")
+
+
+def _create_grid_transition_visualization(
+    timestep_distributions: List[np.ndarray],
+    reachable_cells: List[int],
+    agent_grid_pos: np.ndarray,
+    ego_grid_pos: np.ndarray,
+    N: int,
+    timestep: int,
+    agent_id: int,
+    output_path: str,
+    grid_size_m: float = 20.0,
+    max_samples: int = 25  # 最多显示25个样本
+) -> None:
+    """创建网格布局显示多个transition样本"""
+    
+    n_samples = min(len(timestep_distributions), max_samples)
+    if n_samples == 0:
+        return
+    
+    # 计算网格布局
+    n_cols = min(5, n_samples)  # 最多5列
+    n_rows = (n_samples + n_cols - 1) // n_cols
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 3, n_rows * 3))
+    if n_samples == 1:
+        axes = [axes]
+    elif n_rows == 1:
+        axes = axes.reshape(1, -1)
+    else:
+        axes = axes.flatten()
+    
+    # 坐标转换
+    half_size = grid_size_m / 2
+    extent = [-half_size, half_size, -half_size, half_size]
+    cell_m = grid_size_m / float(N)
+    x0 = -half_size + cell_m * 0.5
+    y0 = -half_size + cell_m * 0.5
+    
+    for sample_idx in range(n_samples):
+        sample_distribution = timestep_distributions[sample_idx]
+        ax = axes[sample_idx]
+        
+        # 创建概率网格
+        prob_grid = np.zeros(N * N)
+        for i, cell_idx in enumerate(reachable_cells):
+            if i < len(sample_distribution):
+                prob_grid[cell_idx] = sample_distribution[i]
+        
+        prob_grid_2d = prob_grid.reshape(N, N)
+        
+        # 绘制热力图
+        im = ax.imshow(prob_grid_2d, origin='lower', cmap='hot', 
+                      vmin=0, vmax=np.max(sample_distribution), extent=extent)
+        ax.set_xlim(extent[0], extent[1])
+        ax.set_ylim(extent[2], extent[3])
+        ax.set_aspect('equal', adjustable='box')
+        
+        # 标记agent和ego位置
+        agent_x = x0 + agent_grid_pos[0] * cell_m
+        agent_y = y0 + agent_grid_pos[1] * cell_m
+        ax.plot(agent_x, agent_y, 'r*', markersize=8, markeredgewidth=1, 
+               markeredgecolor='white', zorder=10)
+        
+        ego_x = x0 + ego_grid_pos[0] * cell_m
+        ego_y = y0 + ego_grid_pos[1] * cell_m
+        ax.plot(ego_x, ego_y, 'w^', markersize=6, markeredgewidth=1, 
+               markeredgecolor='black', zorder=10)
+        
+        ax.set_title(f'Sample {sample_idx}\nMax: {np.max(sample_distribution):.2f}')
+        ax.set_xlabel('X (m)')
+        ax.set_ylabel('Y (m)')
+    
+    # 隐藏多余的子图
+    for sample_idx in range(n_samples, n_rows * n_cols):
+        axes[sample_idx].set_visible(False)
+    
+    plt.suptitle(f'Agent {agent_id} - Timestep {timestep} Transition Samples\n'
+                f'({n_samples} samples, {len(reachable_cells)} reachable cells)', fontsize=14)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"  📊 网格Transition分布可视化已保存: {output_path}")
+

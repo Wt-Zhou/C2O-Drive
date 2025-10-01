@@ -170,7 +170,7 @@ class QValueCalculator:
         self.reward_config = reward_config
         self.collision_detector = CollisionDetector()
         
-        # 创建Dirichlet参数  
+        # 创建Dirichlet参数
         self.dirichlet_params = DirichletParams(
             alpha_in=config.dirichlet_alpha_in,
             alpha_out=config.dirichlet_alpha_out,
