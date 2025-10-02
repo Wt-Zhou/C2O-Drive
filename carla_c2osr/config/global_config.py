@@ -1,7 +1,7 @@
 """
 全局配置管理模块
 
-集中管理所有关键参数，确保系统一致性。
+集中管理所有关键参数,确保系统一致性。
 """
 
 from dataclasses import dataclass
@@ -33,7 +33,7 @@ class TimeConfig:
 @dataclass 
 class SamplingConfig:
     """采样相关配置"""
-    reachable_set_samples: int = 2000     # 可达集采样数量
+    reachable_set_samples: int = 1000     # 可达集采样数量
     reachable_set_samples_legacy: int = 100  # 兼容旧版本的采样数量
     q_value_samples: int = 100           # Q值计算采样数量
     trajectory_samples: int = 100        # 轨迹生成采样数量
@@ -66,19 +66,22 @@ class MatchingConfig:
     ego_action_threshold: float = 5.0       # 自车动作匹配阈值（米）
 
     # 轨迹缓冲区索引精度
-    spatial_resolution: float = 2.0         # 空间索引分辨率（米）
-    ego_action_resolution: float = 1.0      # 动作索引分辨率（米）
+    spatial_resolution: float = 5.0         # 空间索引分辨率（米）
+    ego_action_resolution: float = 5.0      # 动作索引分辨率（米）
 
     # 数据增强
-    trajectory_storage_multiplier: int = 50  # 轨迹存储倍数（1=不重复，10=每次观测存储10次）
+    trajectory_storage_multiplier: int = 100  # 轨迹存储倍数（1=不重复,10=每次观测存储10次）
 
 
 @dataclass
 class RewardConfig:
     """奖励函数相关配置"""
     # 碰撞相关
-    collision_penalty: float = -100.0   # 碰撞惩罚
-    collision_threshold: float = 0.1    # 碰撞距离阈值（米）
+    collision_penalty: float = -50.0   # 碰撞惩罚
+    collision_threshold: float = 0.01    # 碰撞距离阈值
+
+    # 碰撞检测优化
+    collision_check_cell_radius: int = 6  # Cell剪枝半径（cell数,约为半径米数×2）
 
     # 权重参数
     comfort_weight: float = 1.0         # 舒适性权重
@@ -90,12 +93,12 @@ class RewardConfig:
     max_jerk_penalty: float = -2.0      # 最大急动惩罚
     acceleration_penalty_weight: float = 0.1  # 加速度惩罚权重
     jerk_penalty_weight: float = 0.05   # 急动惩罚权重
-    max_comfortable_accel: float = 2.0  # 舒适最大加速度（m/s²）
+    max_comfortable_accel: float = 1.0  # 舒适最大加速度（m/s²）
 
     # 效率参数
     speed_reward_weight: float = 1.0    # 速度奖励权重
     target_speed: float = 5.0           # 目标速度（m/s）
-    progress_reward_weight: float = 2.0 # 前进奖励权重
+    progress_reward_weight: float = 1.0 # 前进奖励权重
 
     # 安全距离参数
     safe_distance: float = 3.0          # 安全距离（m）
@@ -171,15 +174,15 @@ class BaselineConfig:
 @dataclass
 class LatticeConfig:
     """Lattice轨迹配置（基于reference path的采样）"""
-    num_trajectories: int = 10      # 目标轨迹数量
+    num_trajectories: int = 25      # 目标轨迹数量
     lateral_offsets: list = None    # 横向偏移量（米）
     speed_variations: list = None   # 速度变化（m/s）
 
     def __post_init__(self):
         if self.lateral_offsets is None:
-            self.lateral_offsets = [-6.0,-4.0, -2.0, -1.0, 0.0, 1.0, 2.0, 4.0, 6.0]
+            self.lateral_offsets = [-4,-3,-2,-0,2,3,4]
         if self.speed_variations is None:
-            self.speed_variations = [5.0]
+            self.speed_variations = [3,4,5]
 
 
 @dataclass
@@ -188,6 +191,13 @@ class ScenarioConfig:
     town: str = "Town03"
     weather: str = "ClearNoon"
     seed: int = 42
+
+
+@dataclass
+class AgentTrajectoryConfig:
+    """智能体轨迹生成配置"""
+    mode: str = "straight"  # 轨迹生成模式: "dynamic" | "straight" | "stationary"
+    random_seed: int = 42  # 轨迹生成随机种子
 
 
 @dataclass
@@ -204,6 +214,7 @@ class GlobalConfig:
     baseline: BaselineConfig = None
     lattice: LatticeConfig = None
     scenario: ScenarioConfig = None
+    agent_trajectory: AgentTrajectoryConfig = None
 
     # 系统配置
     random_seed: int = 2025
@@ -233,6 +244,8 @@ class GlobalConfig:
             self.lattice = LatticeConfig()
         if self.scenario is None:
             self.scenario = ScenarioConfig()
+        if self.agent_trajectory is None:
+            self.agent_trajectory = AgentTrajectoryConfig()
     
     def update_dt(self, new_dt: float):
         """更新时间步长并保持其他参数一致性"""

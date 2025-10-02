@@ -297,10 +297,27 @@ class QValueCalculator:
             # if sample_idx < 3:  # 只打印前几个样本
             #     print(f"    样本{sample_idx+1}: 碰撞={expected_collision_reward:.3f}, "
             #           f"安全={expected_safety_reward:.3f}, 总Q={final_q_value:.3f}")
-        
-        # 计算平均期望碰撞概率作为碰撞率
-        mean_collision_probability = np.mean(collision_probabilities) if collision_probabilities else 0.0
-        
+
+        # 计算percentile对应的碰撞率（与percentile Q对应）
+        if len(q_values) > 0 and len(collision_probabilities) > 0:
+            # 转换为numpy数组
+            q_values_array = np.array(q_values)
+            collision_probs_array = np.array(collision_probabilities)
+
+            # 对Q值排序，获取percentile对应的索引
+            sorted_indices = np.argsort(q_values_array)
+            percentile_position = int(self.config.q_selection_percentile * (len(q_values_array) - 1))
+            percentile_index = sorted_indices[percentile_position]
+
+            # 使用percentile Q对应的碰撞率
+            percentile_collision_rate = float(collision_probs_array[percentile_index])
+
+            # 同时保留平均碰撞率用于对比
+            mean_collision_probability = float(np.mean(collision_probabilities))
+        else:
+            percentile_collision_rate = 0.0
+            mean_collision_probability = 0.0
+
         # 统计信息
         detailed_info = {
             'calculation_method': '终极优化：纯期望计算，零采样',
@@ -312,13 +329,14 @@ class QValueCalculator:
                 'q_value_std': np.std(q_values),
                 'q_value_min': np.min(q_values),
                 'q_value_max': np.max(q_values),
-                'collision_rate': mean_collision_probability,  # 使用期望碰撞概率
+                'collision_rate': percentile_collision_rate,  # 改为使用percentile对应的碰撞率
+                'mean_collision_rate': mean_collision_probability,  # 保留平均值用于对比
                 'all_q_values': q_values,
                 'collision_probabilities': collision_probabilities  # 保存所有样本的碰撞概率
             },
             'agent_info': {}
         }
-        
+
         if verbose >= 2:
             print(f"  🎉 === Q值计算完成 ===")
             print(f"  方法: {detailed_info['calculation_method']}")
@@ -326,7 +344,8 @@ class QValueCalculator:
             print(f"  可变奖励范围: [{np.min(detailed_info['agent_dependent_rewards']):.3f}, "
                   f"{np.max(detailed_info['agent_dependent_rewards']):.3f}]")
             print(f"  最终Q值: 均值={np.mean(q_values):.3f}, 标准差={np.std(q_values):.3f}")
-            print(f"  期望碰撞概率: {mean_collision_probability:.3f}")
+            print(f"  碰撞概率: P{int(self.config.q_selection_percentile*100)}={percentile_collision_rate:.3f}, "
+                  f"Mean={mean_collision_probability:.3f}")
             print(f"  计算优化: {detailed_info['computational_savings']}")
         
         return q_values, detailed_info
@@ -399,11 +418,12 @@ class QValueCalculator:
         collision_count = 0  # 调试：碰撞计数
 
         # 🚀 优化1: 预计算ego轨迹占据的cell集合（用于剪枝）
+        # 使用配置的剪枝半径（默认radius=10，约5米，覆盖车辆长度4.5m）
         ego_cells_set = set()
         for ego_pos in ego_trajectory:
             ego_cell = grid.world_to_cell(ego_pos)
-            # 扩展到邻域（考虑车辆尺寸，半径2约等于1米）
-            neighbors = grid.get_neighbors(ego_cell, radius=2)
+            # 扩展到邻域（考虑车辆尺寸）
+            neighbors = grid.get_neighbors(ego_cell, radius=self.reward_config.collision_check_cell_radius)
             ego_cells_set.update(neighbors)
 
         # 统计剪枝效果
@@ -490,7 +510,9 @@ class QValueCalculator:
             if verbose >= 2:
                 prune_rate = (pruned_checks / total_checks) * 100
                 actual_checks = total_checks - pruned_checks
-                print(f"  ⚡ Cell剪枝: 总cells={total_checks}, 剪枝={pruned_checks}, 实际检测={actual_checks}, 剪枝率={prune_rate:.1f}%")
+                radius_m = self.reward_config.collision_check_cell_radius * 0.5  # cell_size = 0.5m
+                print(f"  ⚡ Cell剪枝 (半径={self.reward_config.collision_check_cell_radius}cells≈{radius_m:.1f}m): "
+                      f"总cells={total_checks}, 剪枝={pruned_checks}, 实际检测={actual_checks}, 剪枝率={prune_rate:.1f}%")
 
         return expected_reward, expected_collision_prob
     

@@ -22,22 +22,51 @@ class SimpleTrajectoryGenerator:
         """
         self.grid_bounds = grid_bounds
 
-    def generate_agent_trajectory(self, agent: AgentState, horizon: int, dt: Optional[float] = None) -> List[np.ndarray]:
+    def generate_agent_trajectory(self, agent: AgentState, horizon: int, dt: Optional[float] = None, mode: Optional[str] = None) -> List[np.ndarray]:
         """生成智能体轨迹。
 
         Args:
             agent: 智能体状态
             horizon: 轨迹长度
             dt: 时间步长，默认从全局配置读取
+            mode: 轨迹生成模式，默认从全局配置读取
+                  - "dynamic": 随机动力学模型（默认）
+                  - "straight": 匀速直线运动
+                  - "stationary": 静止不动
 
         Returns:
             轨迹位置列表
         """
         # 从全局配置读取默认参数
-        if dt is None:
+        if dt is None or mode is None:
             from carla_c2osr.config import get_global_config
-            dt = get_global_config().time.dt
+            config = get_global_config()
+            if dt is None:
+                dt = config.time.dt
+            if mode is None:
+                mode = config.agent_trajectory.mode
 
+        # 根据模式选择生成方法
+        if mode == "stationary":
+            return self._generate_stationary_trajectory(agent, horizon)
+        elif mode == "straight":
+            return self._generate_straight_trajectory(agent, horizon, dt)
+        elif mode == "dynamic":
+            return self._generate_dynamic_trajectory(agent, horizon, dt)
+        else:
+            raise ValueError(f"Unknown trajectory mode: {mode}")
+
+    def _generate_dynamic_trajectory(self, agent: AgentState, horizon: int, dt: float) -> List[np.ndarray]:
+        """生成动态轨迹（原有的随机动力学模型）。
+
+        Args:
+            agent: 智能体状态
+            horizon: 轨迹长度
+            dt: 时间步长
+
+        Returns:
+            轨迹位置列表
+        """
         # 获取动力学参数
         dynamics = AgentDynamicsParams.for_agent_type(agent.agent_type)
         
@@ -82,9 +111,57 @@ class SimpleTrajectoryGenerator:
             
             current_pos = np.array([next_x, next_y])
             trajectory.append(current_pos.copy())
-        
+
         return trajectory
-    
+
+    def _generate_stationary_trajectory(self, agent: AgentState, horizon: int) -> List[np.ndarray]:
+        """生成静止轨迹（agent保持在初始位置）。
+
+        Args:
+            agent: 智能体状态
+            horizon: 轨迹长度
+
+        Returns:
+            轨迹位置列表（所有位置相同）
+        """
+        trajectory = []
+        position = np.array(agent.position_m, dtype=float)
+        for _ in range(horizon):
+            trajectory.append(position.copy())
+        return trajectory
+
+    def _generate_straight_trajectory(self, agent: AgentState, horizon: int, dt: float) -> List[np.ndarray]:
+        """生成匀速直线轨迹。
+
+        Args:
+            agent: 智能体状态
+            horizon: 轨迹长度
+            dt: 时间步长
+
+        Returns:
+            轨迹位置列表
+        """
+        trajectory = []
+        current_pos = np.array(agent.position_m, dtype=float)
+        velocity = np.array(agent.velocity_mps, dtype=float)
+
+        min_bound, max_bound = self.grid_bounds
+
+        for _ in range(horizon):
+            # 匀速直线运动
+            next_pos = current_pos + velocity * dt
+
+            # 边界处理：如果超出边界，停止移动
+            if next_pos[0] < min_bound or next_pos[0] > max_bound or \
+               next_pos[1] < min_bound or next_pos[1] > max_bound:
+                # 保持在当前位置
+                next_pos = current_pos.copy()
+
+            current_pos = next_pos
+            trajectory.append(current_pos.copy())
+
+        return trajectory
+
     def _vehicle_dynamics_step(self, pos: np.ndarray, speed: float, heading: float,
                               dynamics: AgentDynamicsParams, dt: float, timestep: int) -> Tuple[np.ndarray, float, float]:
         """车辆动力学一步积分，复用现有的自行车模型逻辑。

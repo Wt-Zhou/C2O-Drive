@@ -462,8 +462,88 @@ class OptimizedMultiTimestepSpatialDirichletBank:
         """获取智能体在指定时间步的alpha参数（兼容性方法）。"""
         if agent_id not in self.agent_alphas:
             raise ValueError(f"Agent {agent_id} not initialized")
-        
+
         if timestep not in self.agent_alphas[agent_id]:
             raise ValueError(f"Timestep {timestep} not initialized for agent {agent_id}")
-        
+
         return self.agent_alphas[agent_id][timestep].copy()
+
+    def to_dict(self) -> Dict:
+        """序列化Bank状态为字典
+
+        Returns:
+            包含所有内部状态的字典
+        """
+        # 序列化alpha参数（numpy数组将在CheckpointManager中处理）
+        agent_alphas_serialized = {}
+        for agent_id, timesteps in self.agent_alphas.items():
+            agent_alphas_serialized[agent_id] = {
+                timestep: alpha for timestep, alpha in timesteps.items()
+            }
+
+        # 序列化可达集
+        agent_reachable_sets_serialized = {}
+        for agent_id, timesteps in self.agent_reachable_sets.items():
+            agent_reachable_sets_serialized[agent_id] = {
+                timestep: cells for timestep, cells in timesteps.items()
+            }
+
+        # 序列化参数
+        params_dict = {
+            'alpha_in': self.params.alpha_in,
+            'alpha_out': self.params.alpha_out,
+            'delta': self.params.delta,
+            'cK': self.params.cK
+        }
+
+        return {
+            'K': self.K,
+            'horizon': self.horizon,
+            'params': params_dict,
+            'agent_alphas': agent_alphas_serialized,
+            'agent_reachable_sets': agent_reachable_sets_serialized
+        }
+
+    @staticmethod
+    def from_dict(data: Dict) -> 'OptimizedMultiTimestepSpatialDirichletBank':
+        """从字典恢复Bank状态
+
+        Args:
+            data: 序列化的字典
+
+        Returns:
+            恢复的Bank实例
+        """
+        # 恢复参数
+        params = DirichletParams(
+            alpha_in=data['params']['alpha_in'],
+            alpha_out=data['params']['alpha_out'],
+            delta=data['params']['delta'],
+            cK=data['params']['cK']
+        )
+
+        # 创建Bank实例
+        bank = OptimizedMultiTimestepSpatialDirichletBank(
+            K=data['K'],
+            params=params,
+            horizon=data['horizon']
+        )
+
+        # 恢复agent_alphas（numpy数组）
+        for agent_id, timesteps in data['agent_alphas'].items():
+            agent_id_int = int(agent_id)
+            bank.agent_alphas[agent_id_int] = {}
+            for timestep, alpha in timesteps.items():
+                timestep_int = int(timestep)
+                # alpha应该已经是numpy数组
+                bank.agent_alphas[agent_id_int][timestep_int] = alpha
+
+        # 恢复agent_reachable_sets
+        for agent_id, timesteps in data['agent_reachable_sets'].items():
+            agent_id_int = int(agent_id)
+            bank.agent_reachable_sets[agent_id_int] = {}
+            for timestep, cells in timesteps.items():
+                timestep_int = int(timestep)
+                bank.agent_reachable_sets[agent_id_int][timestep_int] = list(cells)
+
+        return bank

@@ -498,7 +498,7 @@ class HighPerformanceTrajectoryBuffer:
         total_episodes = len(self._episode_lookup)
         total_agents = len(self._agent_episodes)
         total_agent_episodes = sum(len(episodes) for episodes in self._agent_episodes.values())
-        
+
         return {
             'total_episodes': total_episodes,
             'total_agents': total_agents,
@@ -507,6 +507,164 @@ class HighPerformanceTrajectoryBuffer:
             'spatial_index_size': len(self._ego_spatial_index),
             'action_index_size': len(self._ego_action_index)
         }
+
+    def to_dict(self) -> Dict:
+        """序列化buffer状态为字典
+
+        Returns:
+            包含所有内部状态的字典
+        """
+        # 序列化AgentEpisodeData
+        agent_episodes_serialized = {}
+        for agent_id, episodes in self._agent_episodes.items():
+            agent_episodes_serialized[str(agent_id)] = [
+                {
+                    'episode_id': ep.episode_id,
+                    'agent_id': ep.agent_id,
+                    'agent_type': ep.agent_type,
+                    'initial_mdp': {
+                        'ego_position': ep.initial_mdp.ego_position,
+                        'ego_velocity': ep.initial_mdp.ego_velocity,
+                        'ego_heading': ep.initial_mdp.ego_heading,
+                        'agents_states': ep.initial_mdp.agents_states,
+                        'ego_action_trajectory': ep.initial_mdp.ego_action_trajectory
+                    },
+                    'agent_trajectory_cells': ep.agent_trajectory_cells,
+                    'agent_count_hash': ep.agent_count_hash,
+                    'ego_spatial_hash': ep.ego_spatial_hash
+                }
+                for ep in episodes
+            ]
+
+        # 序列化索引
+        agent_count_index_serialized = {
+            str(k): list(v) for k, v in self._agent_count_index.items()
+        }
+
+        ego_spatial_index_serialized = {
+            f"{k[0]}_{k[1]}": list(v) for k, v in self._ego_spatial_index.items()
+        }
+
+        ego_action_index_serialized = {
+            k: list(v) for k, v in self._ego_action_index.items()
+        }
+
+        episode_lookup_serialized = {
+            str(episode_id): {
+                'episode_id': ep.episode_id,
+                'agent_id': ep.agent_id,
+                'agent_type': ep.agent_type,
+                'initial_mdp': {
+                    'ego_position': ep.initial_mdp.ego_position,
+                    'ego_velocity': ep.initial_mdp.ego_velocity,
+                    'ego_heading': ep.initial_mdp.ego_heading,
+                    'agents_states': ep.initial_mdp.agents_states,
+                    'ego_action_trajectory': ep.initial_mdp.ego_action_trajectory
+                },
+                'agent_trajectory_cells': ep.agent_trajectory_cells,
+                'agent_count_hash': ep.agent_count_hash,
+                'ego_spatial_hash': ep.ego_spatial_hash
+            }
+            for episode_id, ep in self._episode_lookup.items()
+        }
+
+        return {
+            'horizon': self.horizon,
+            'spatial_resolution': self.spatial_resolution,
+            'ego_action_resolution': self.ego_action_resolution,
+            'episode_counter': self._episode_counter,
+            'agent_episodes': agent_episodes_serialized,
+            'agent_count_index': agent_count_index_serialized,
+            'ego_spatial_index': ego_spatial_index_serialized,
+            'ego_action_index': ego_action_index_serialized,
+            'episode_lookup': episode_lookup_serialized
+        }
+
+    @staticmethod
+    def from_dict(data: Dict) -> 'HighPerformanceTrajectoryBuffer':
+        """从字典恢复buffer状态
+
+        Args:
+            data: 序列化的字典
+
+        Returns:
+            恢复的TrajectoryBuffer实例
+        """
+        # 创建buffer实例
+        buffer = HighPerformanceTrajectoryBuffer(
+            horizon=data['horizon'],
+            spatial_resolution=data['spatial_resolution'],
+            ego_action_resolution=data['ego_action_resolution']
+        )
+
+        # 恢复episode计数器
+        buffer._episode_counter = data['episode_counter']
+
+        # 恢复agent_episodes
+        for agent_id_str, episodes in data['agent_episodes'].items():
+            agent_id = int(agent_id_str)
+            buffer._agent_episodes[agent_id] = []
+
+            for ep_data in episodes:
+                mdp = MDPStateAction(
+                    ego_position=tuple(ep_data['initial_mdp']['ego_position']),
+                    ego_velocity=tuple(ep_data['initial_mdp']['ego_velocity']),
+                    ego_heading=ep_data['initial_mdp']['ego_heading'],
+                    agents_states=[tuple(s) for s in ep_data['initial_mdp']['agents_states']],
+                    ego_action_trajectory=[tuple(pos) for pos in ep_data['initial_mdp']['ego_action_trajectory']]
+                )
+
+                episode_data = AgentEpisodeData(
+                    episode_id=ep_data['episode_id'],
+                    agent_id=ep_data['agent_id'],
+                    agent_type=ep_data['agent_type'],
+                    initial_mdp=mdp,
+                    agent_trajectory_cells=ep_data['agent_trajectory_cells'],
+                    agent_count_hash=ep_data['agent_count_hash'],
+                    ego_spatial_hash=ep_data['ego_spatial_hash']
+                )
+
+                buffer._agent_episodes[agent_id].append(episode_data)
+
+        # 恢复索引
+        buffer._agent_count_index = {
+            int(k): set(v) for k, v in data['agent_count_index'].items()
+        }
+
+        buffer._ego_spatial_index = {
+            tuple(map(int, k.split('_'))): set(v)
+            for k, v in data['ego_spatial_index'].items()
+        }
+
+        buffer._ego_action_index = {
+            k: set(v) for k, v in data['ego_action_index'].items()
+        }
+
+        # 恢复episode_lookup
+        for episode_id_str, ep_data in data['episode_lookup'].items():
+            episode_id = int(episode_id_str)
+
+            mdp = MDPStateAction(
+                ego_position=tuple(ep_data['initial_mdp']['ego_position']),
+                ego_velocity=tuple(ep_data['initial_mdp']['ego_velocity']),
+                ego_heading=ep_data['initial_mdp']['ego_heading'],
+                agents_states=[tuple(s) for s in ep_data['initial_mdp']['agents_states']],
+                ego_action_trajectory=[tuple(pos) for pos in ep_data['initial_mdp']['ego_action_trajectory']]
+            )
+
+            episode_data = AgentEpisodeData(
+                episode_id=ep_data['episode_id'],
+                agent_id=ep_data['agent_id'],
+                agent_type=ep_data['agent_type'],
+                initial_mdp=mdp,
+                agent_trajectory_cells=ep_data['agent_trajectory_cells'],
+                agent_count_hash=ep_data['agent_count_hash'],
+                ego_spatial_hash=ep_data['ego_spatial_hash']
+            )
+
+            buffer._episode_lookup[episode_id] = episode_data
+
+        return buffer
 
 
 # 为了向后兼容，将新的HighPerformanceTrajectoryBuffer作为默认的TrajectoryBuffer

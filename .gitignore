@@ -2,3 +2,7 @@
 outputs/trajectory_selection_experiment/
 
 outputs/replay_experiment/
+
+checkpoints/
+
+outputs/

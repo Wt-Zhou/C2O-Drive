@@ -29,8 +29,11 @@ class DataManager:
         agent_trajectories = {}
         agent_trajectory_cells = {}
 
-        # 固定种子保证轨迹一致性
-        rng = np.random.default_rng(42)
+        # 从配置读取随机种子保证轨迹一致性
+        # 注意：轨迹模式现在可以通过 config.agent_trajectory.mode 设置 ("dynamic", "straight", "stationary")
+        from carla_c2osr.config import get_global_config
+        config = get_global_config()
+        rng = np.random.default_rng(config.agent_trajectory.random_seed)
 
         for i, agent in enumerate(self.ctx.world_init.agents):
             agent_id = i + 1

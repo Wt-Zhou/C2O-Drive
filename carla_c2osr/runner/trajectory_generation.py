@@ -25,8 +25,10 @@ def generate_agent_trajectories(ctx: EpisodeContext) -> Tuple[Dict[int, List[np.
     agent_trajectories = {}
     agent_trajectory_cells = {}
 
-    # 固定随机种子确保轨迹可复现
-    rng = np.random.default_rng(42)
+    # 从配置读取随机种子确保轨迹可复现
+    from carla_c2osr.config import get_global_config
+    config = get_global_config()
+    rng = np.random.default_rng(config.agent_trajectory.random_seed)
 
     for i, agent in enumerate(ctx.world_init.agents):
         agent_id = i + 1

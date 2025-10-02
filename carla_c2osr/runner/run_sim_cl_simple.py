@@ -35,6 +35,7 @@ from carla_c2osr.evaluation.q_distribution_tracker import QDistributionTracker
 from carla_c2osr.evaluation.q_value_calculator import QValueConfig
 from carla_c2osr.utils.simple_trajectory_generator import SimpleTrajectoryGenerator
 from carla_c2osr.utils.lattice_planner import LatticePlanner
+from carla_c2osr.utils.checkpoint_manager import CheckpointManager
 from carla_c2osr.env.scenario_manager import ScenarioManager
 from carla_c2osr.config import get_global_config, set_global_config, ConfigPresets
 
@@ -199,12 +200,13 @@ def initialize_components(args, world_init, output_dir):
     }
 
 
-def run_all_episodes(args, components, reference_path, world_init, scenario_state, output_dir):
+def run_all_episodes(args, components, reference_path, world_init, scenario_state, output_dir,
+                     checkpoint_manager=None, start_episode=0):
     """运行所有episodes"""
     all_episodes = []
     summary_frames = []
 
-    for e in range(args.episodes):
+    for e in range(start_episode, args.episodes):
         try:
             rng = np.random.default_rng(args.seed + e)
 
@@ -238,6 +240,35 @@ def run_all_episodes(args, components, reference_path, world_init, scenario_stat
                 import matplotlib.pyplot as plt
                 plt.close('all')
                 print(f"  内存清理: Episode {e+1}")
+
+            # 定期保存checkpoint
+            if checkpoint_manager and args.checkpoint_interval > 0 and (e + 1) % args.checkpoint_interval == 0:
+                try:
+                    # 准备配置字典
+                    config_dict = {
+                        'time': config.time.__dict__,
+                        'sampling': config.sampling.__dict__,
+                        'grid': config.grid.__dict__,
+                        'dirichlet': config.dirichlet.__dict__,
+                        'matching': config.matching.__dict__,
+                        'reward': config.reward.__dict__,
+                        'lattice': config.lattice.__dict__,
+                        'visualization': config.visualization.__dict__
+                    }
+
+                    checkpoint_manager.save_checkpoint(
+                        episode_id=e,
+                        trajectory_buffer=components['trajectory_buffer'],
+                        dirichlet_bank=components['bank'],
+                        q_tracker=components['q_tracker'],
+                        config=config_dict,
+                        metadata={
+                            'episodes_total': args.episodes,
+                            'checkpoint_interval': args.checkpoint_interval
+                        }
+                    )
+                except Exception as checkpoint_ex:
+                    print(f"  ⚠️ Checkpoint保存失败: {checkpoint_ex}")
 
         except Exception as ex:
             print(f"Episode {e+1} 执行失败: {ex}")
@@ -327,6 +358,11 @@ def parse_arguments():
                        default="straight", help="自车运动模式")
     parser.add_argument("--sigma", type=float, default=0.5, help="软计数核宽度")
 
+    # Checkpoint参数
+    parser.add_argument("--checkpoint-dir", type=str, default="checkpoints", help="Checkpoint保存目录")
+    parser.add_argument("--checkpoint-interval", type=int, default=0, help="Checkpoint保存间隔（每N个episode，0表示不定期保存）")
+    parser.add_argument("--resume-from", type=str, help="从指定checkpoint恢复训练")
+
     # 配置预设参数
     parser.add_argument("--config-preset", choices=["default", "fast", "high-precision", "long-horizon"],
                        default="default", help="预设配置模板")
@@ -413,9 +449,39 @@ def main():
     )
     print(f"\n生成Reference Path: {len(reference_path)} 个waypoints (mode={args.ego_mode})")
 
+    # 6.5. Checkpoint管理和恢复
+    checkpoint_manager = CheckpointManager(checkpoint_dir=args.checkpoint_dir)
+    start_episode = 0
+
+    if args.resume_from:
+        print(f"\n🔄 从checkpoint恢复训练...")
+        checkpoint_data = checkpoint_manager.load_checkpoint(args.resume_from)
+
+        # 恢复training_state
+        start_episode = checkpoint_data['training_state']['episode_id'] + 1
+
+        # 恢复组件状态
+        components['trajectory_buffer'] = TrajectoryBuffer.from_dict(checkpoint_data['trajectory_buffer_data'])
+        components['bank'] = OptimizedMultiTimestepSpatialDirichletBank.from_dict(checkpoint_data['dirichlet_bank_data'])
+
+        # 恢复QDistributionTracker
+        q_tracker_data = checkpoint_data['q_tracker_data']
+        components['q_tracker'].episode_data = q_tracker_data.get('episode_data', [])
+        components['q_tracker'].q_value_history = q_tracker_data.get('q_value_history', [])
+        components['q_tracker'].percentile_q_history = q_tracker_data.get('percentile_q_history', [])
+        components['q_tracker'].collision_rate_history = q_tracker_data.get('collision_rate_history', [])
+        components['q_tracker'].q_distribution_history = [ep['q_distribution'] for ep in components['q_tracker'].episode_data]
+        components['q_tracker'].detailed_info_history = [ep.get('detailed_info', {}) for ep in components['q_tracker'].episode_data]
+
+        # 更新buffer_analyzer
+        components['buffer_analyzer'] = BufferAnalyzer(components['trajectory_buffer'])
+
+        print(f"✅ 已恢复到Episode {start_episode}，继续训练...")
+
     # 7. 运行所有episodes
     all_episodes, summary_frames = run_all_episodes(
-        args, components, reference_path, world_init, scenario_state, output_dir
+        args, components, reference_path, world_init, scenario_state, output_dir,
+        checkpoint_manager=checkpoint_manager, start_episode=start_episode
     )
 
     # 8. 生成汇总GIF
@@ -429,6 +495,36 @@ def main():
         print_summary(all_episodes, components, output_dir)
     else:
         print("\n警告: 所有episode都失败了")
+
+    # 10. 保存最终checkpoint
+    if all_episodes:
+        try:
+            print(f"\n💾 保存最终checkpoint...")
+            # 准备配置字典
+            config_dict = {
+                'time': config.time.__dict__,
+                'sampling': config.sampling.__dict__,
+                'grid': config.grid.__dict__,
+                'dirichlet': config.dirichlet.__dict__,
+                'matching': config.matching.__dict__,
+                'reward': config.reward.__dict__,
+                'lattice': config.lattice.__dict__,
+                'visualization': config.visualization.__dict__
+            }
+
+            checkpoint_manager.save_checkpoint(
+                episode_id=args.episodes - 1,
+                trajectory_buffer=components['trajectory_buffer'],
+                dirichlet_bank=components['bank'],
+                q_tracker=components['q_tracker'],
+                config=config_dict,
+                metadata={
+                    'episodes_total': args.episodes,
+                    'is_final': True
+                }
+            )
+        except Exception as checkpoint_ex:
+            print(f"  ⚠️ 最终checkpoint保存失败: {checkpoint_ex}")
 
 
 if __name__ == "__main__":
