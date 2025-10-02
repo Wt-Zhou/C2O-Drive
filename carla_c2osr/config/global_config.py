@@ -12,8 +12,8 @@ import os
 @dataclass
 class TimeConfig:
     """时间相关配置"""
-    dt: float = 0.2                     # 时间步长（秒）
-    default_horizon: int = 8             # 默认预测时间步数
+    dt: float = 1                     # 时间步长（秒）
+    default_horizon: int = 5             # 默认预测时间步数
     simulation_fps: int = 10             # 仿真帧率
     
     @property
@@ -33,8 +33,8 @@ class TimeConfig:
 @dataclass 
 class SamplingConfig:
     """采样相关配置"""
-    reachable_set_samples: int = 200     # 可达集采样数量
-    reachable_set_samples_legacy: int = 50  # 兼容旧版本的采样数量
+    reachable_set_samples: int = 2000     # 可达集采样数量
+    reachable_set_samples_legacy: int = 100  # 兼容旧版本的采样数量
     q_value_samples: int = 100           # Q值计算采样数量
     trajectory_samples: int = 100        # 轨迹生成采样数量
 
@@ -42,9 +42,9 @@ class SamplingConfig:
 @dataclass
 class GridConfig:
     """网格相关配置"""
-    grid_size_m: float = 20.0           # 网格物理尺寸（米）
+    grid_size_m: float = 100.0           # 网格物理尺寸（米）
     grid_resolution: int = 200          # 网格分辨率（N×N）
-    cell_size_m: float = 0.1            # 网格单元尺寸（米）
+    cell_size_m: float = 0.5            # 网格单元尺寸（米）
 
 
 @dataclass
@@ -58,20 +58,51 @@ class DirichletConfig:
 
 
 @dataclass
+class MatchingConfig:
+    """MDP状态-动作匹配相关配置"""
+    # 轨迹匹配阈值
+    ego_state_threshold: float = 5.0        # 自车状态匹配阈值（米）
+    agents_state_threshold: float = 5.0     # 环境智能体状态匹配阈值（米）
+    ego_action_threshold: float = 5.0       # 自车动作匹配阈值（米）
+
+    # 轨迹缓冲区索引精度
+    spatial_resolution: float = 2.0         # 空间索引分辨率（米）
+    ego_action_resolution: float = 1.0      # 动作索引分辨率（米）
+
+    # 数据增强
+    trajectory_storage_multiplier: int = 50  # 轨迹存储倍数（1=不重复，10=每次观测存储10次）
+
+
+@dataclass
 class RewardConfig:
     """奖励函数相关配置"""
+    # 碰撞相关
     collision_penalty: float = -100.0   # 碰撞惩罚
+    collision_threshold: float = 0.1    # 碰撞距离阈值（米）
+
+    # 权重参数
     comfort_weight: float = 1.0         # 舒适性权重
     efficiency_weight: float = 1.0      # 效率权重
-    safety_weight: float = 1.0          # 安全权重
-    
+    safety_weight: float = 10.0          # 安全权重
+
     # 舒适性参数
     max_accel_penalty: float = -1.0     # 最大加速度惩罚
     max_jerk_penalty: float = -2.0      # 最大急动惩罚
-    
+    acceleration_penalty_weight: float = 0.1  # 加速度惩罚权重
+    jerk_penalty_weight: float = 0.05   # 急动惩罚权重
+    max_comfortable_accel: float = 2.0  # 舒适最大加速度（m/s²）
+
     # 效率参数
-    min_speed_reward: float = 1.0       # 最小速度奖励
-    progress_reward: float = 2.0        # 前进奖励
+    speed_reward_weight: float = 1.0    # 速度奖励权重
+    target_speed: float = 5.0           # 目标速度（m/s）
+    progress_reward_weight: float = 2.0 # 前进奖励权重
+
+    # 安全距离参数
+    safe_distance: float = 3.0          # 安全距离（m）
+    distance_penalty_weight: float = 0.0  # 距离惩罚权重
+
+    # 中心线偏移参数
+    centerline_offset_penalty_weight: float = 1.0  # 中心线偏移惩罚权重
 
 
 @dataclass
@@ -81,12 +112,15 @@ class VisualizationConfig:
     dpi: int = 150                      # 图片分辨率
     gif_fps: int = 2                    # GIF帧率
     font_size: int = 12                 # 字体大小
-    
+
     # 可达集可视化
     timestep_alphas: list = None        # 不同时间步的透明度
     timestep_linewidths: list = None    # 不同时间步的线宽
     agent_colors: list = None           # 智能体颜色
-    
+
+    # 日志输出级别
+    verbose_level: int = 1              # 0=minimal, 1=normal, 2=debug
+
     def __post_init__(self):
         if self.timestep_alphas is None:
             self.timestep_alphas = [1.0, 0.8, 0.6, 0.4, 0.3]
@@ -109,10 +143,13 @@ class C2OSRConfig:
     risk_mode: str = "union"        # union|independent
     risk_lambda: float = 5.0        # 风险权重
     risk_epsilon: float = 0.2       # 机会约束阈值（每条轨迹）
-    gamma: float = 0.99             # 折扣因子
-    
+    gamma: float = 0.9             # 折扣因子
+
     # 采样参数
     samples: int = 32               # 后验采样数 S
+
+    # Q值选择策略
+    q_selection_percentile: float = 0.05  # Q值选择百分位数（0.0=最小值, 0.1=10%分位, 0.5=中位数）
 
 
 @dataclass
@@ -133,19 +170,16 @@ class BaselineConfig:
 
 @dataclass
 class LatticeConfig:
-    """Lattice轨迹配置（从lattice.yaml迁移）"""
-    speeds_mps: list = None         # 速度列表
-    steers: list = None             # 转向角度列表
-    accels_mps2: list = None        # 加速度列表
-    num_trajectories: int = 9       # 生成上限
-    
+    """Lattice轨迹配置（基于reference path的采样）"""
+    num_trajectories: int = 10      # 目标轨迹数量
+    lateral_offsets: list = None    # 横向偏移量（米）
+    speed_variations: list = None   # 速度变化（m/s）
+
     def __post_init__(self):
-        if self.speeds_mps is None:
-            self.speeds_mps = [5.0, 7.0]
-        if self.steers is None:
-            self.steers = [-0.2, -0.1, 0.0, 0.1, 0.2]
-        if self.accels_mps2 is None:
-            self.accels_mps2 = [-1.0, 0.0, 1.0]
+        if self.lateral_offsets is None:
+            self.lateral_offsets = [-6.0,-4.0, -2.0, -1.0, 0.0, 1.0, 2.0, 4.0, 6.0]
+        if self.speed_variations is None:
+            self.speed_variations = [5.0]
 
 
 @dataclass
@@ -163,18 +197,19 @@ class GlobalConfig:
     sampling: SamplingConfig = None
     grid: GridConfig = None
     dirichlet: DirichletConfig = None
+    matching: MatchingConfig = None
     reward: RewardConfig = None
     visualization: VisualizationConfig = None
     c2osr: C2OSRConfig = None
     baseline: BaselineConfig = None
     lattice: LatticeConfig = None
     scenario: ScenarioConfig = None
-    
+
     # 系统配置
     random_seed: int = 2025
     debug_mode: bool = False
     log_level: str = "INFO"
-    
+
     def __post_init__(self):
         if self.time is None:
             self.time = TimeConfig()
@@ -184,6 +219,8 @@ class GlobalConfig:
             self.grid = GridConfig()
         if self.dirichlet is None:
             self.dirichlet = DirichletConfig()
+        if self.matching is None:
+            self.matching = MatchingConfig()
         if self.reward is None:
             self.reward = RewardConfig()
         if self.visualization is None:

@@ -7,32 +7,37 @@
 
 import numpy as np
 import math
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from carla_c2osr.env.types import AgentState, AgentType, AgentDynamicsParams
 
 
 class SimpleTrajectoryGenerator:
     """简化的轨迹生成器，生成符合动力学约束的轨迹。"""
-    
+
     def __init__(self, grid_bounds: Tuple[float, float] = (-9.0, 9.0)):
         """初始化轨迹生成器。
-        
+
         Args:
             grid_bounds: 网格边界，防止智能体移动到网格外
         """
         self.grid_bounds = grid_bounds
-    
-    def generate_agent_trajectory(self, agent: AgentState, horizon: int, dt: float = 1.0) -> List[np.ndarray]:
+
+    def generate_agent_trajectory(self, agent: AgentState, horizon: int, dt: Optional[float] = None) -> List[np.ndarray]:
         """生成智能体轨迹。
-        
+
         Args:
             agent: 智能体状态
             horizon: 轨迹长度
-            dt: 时间步长
-            
+            dt: 时间步长，默认从全局配置读取
+
         Returns:
             轨迹位置列表
         """
+        # 从全局配置读取默认参数
+        if dt is None:
+            from carla_c2osr.config import get_global_config
+            dt = get_global_config().time.dt
+
         # 获取动力学参数
         dynamics = AgentDynamicsParams.for_agent_type(agent.agent_type)
         

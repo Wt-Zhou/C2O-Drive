@@ -6,6 +6,18 @@ import math
 
 from carla_c2osr.env.types import AgentState, WorldState, EgoState, AgentType, AgentDynamicsParams
 
+# Numba加速（可选依赖）
+try:
+    from numba import jit
+    NUMBA_AVAILABLE = True
+except ImportError:
+    NUMBA_AVAILABLE = False
+    # 创建一个空装饰器用于兼容
+    def jit(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+
 
 @dataclass
 class GridSpec:
@@ -92,33 +104,72 @@ class GridMapper:
 
     def world_to_cell(self, position_m: Tuple[float, float]) -> int:
         """将世界坐标直接映射到网格索引。
-        
+
         Args:
             position_m: 世界坐标 (x, y)
-            
+
         Returns:
             网格单元索引
         """
         grid_xy = self.to_grid_frame(position_m)
         return self.xy_to_index(grid_xy)
 
-    def successor_cells(self, agent: AgentState, dt: float = 1.0, 
-                       n_samples: int = 100) -> List[int]:
+    def get_neighbors(self, cell_idx: int, radius: int = 1) -> List[int]:
+        """获取指定cell的邻域cells（用于碰撞检测剪枝）。
+
+        Args:
+            cell_idx: 中心cell索引
+            radius: 邻域半径（cell数），默认1表示8邻域
+
+        Returns:
+            邻域cell索引列表（包含中心cell）
+        """
+        if cell_idx < 0 or cell_idx >= self.spec.num_cells:
+            return []
+
+        # 转换为2D坐标
+        center_iy = cell_idx // self.side
+        center_ix = cell_idx % self.side
+
+        neighbors = []
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                nx = center_ix + dx
+                ny = center_iy + dy
+
+                # 边界检查
+                if 0 <= nx < self.side and 0 <= ny < self.side:
+                    neighbor_idx = ny * self.side + nx
+                    neighbors.append(neighbor_idx)
+
+        return neighbors
+
+    def successor_cells(self, agent: AgentState, dt: Optional[float] = None,
+                       n_samples: Optional[int] = None) -> List[int]:
         """计算智能体在下一时刻的一步可达网格单元集合。
-        
+
         根据智能体类型使用相应的动力学模型：
         - 行人: 质点模型，可任意方向加速
         - 车辆: 自行车模型，考虑阿克曼转向约束
         - 自行车/摩托车: 自行车模型，转向能力更强
-        
+
         Args:
             agent: 智能体当前状态
-            dt: 时间步长，默认 1.0 秒
-            n_samples: 采样数量，默认 100
-            
+            dt: 时间步长，默认从全局配置读取
+            n_samples: 采样数量，默认从全局配置读取
+
         Returns:
             可达网格单元索引列表（去重）
         """
+        # 从全局配置读取默认参数
+        if dt is None or n_samples is None:
+            from carla_c2osr.config import get_global_config
+            config = get_global_config()
+            if dt is None:
+                dt = config.time.dt
+            if n_samples is None:
+                n_samples = config.sampling.reachable_set_samples_legacy
+
         # 获取智能体动力学参数
         dynamics = AgentDynamicsParams.for_agent_type(agent.agent_type)
         
@@ -339,19 +390,52 @@ class GridMapper:
             world_coords[:, 1] += center_y
             return world_coords
     
-    def multi_timestep_successor_cells(self, agent: AgentState, horizon: int = 3, 
-                                     dt: float = 0.2, n_samples: int = 200) -> Dict[int, List[int]]:
+    def multi_timestep_successor_cells(self, agent: AgentState, horizon: Optional[int] = None,
+                                     dt: Optional[float] = None, n_samples: Optional[int] = None,
+                                     use_numba: bool = True) -> Dict[int, List[int]]:
         """计算智能体在未来多个时刻的可达网格单元集合。
-        
+
         Args:
             agent: 智能体当前状态
-            horizon: 预测时间步数
-            dt: 时间步长，默认 0.2 秒
-            n_samples: 采样数量，默认 200
-            
+            horizon: 预测时间步数，默认从全局配置读取
+            dt: 时间步长，默认从全局配置读取
+            n_samples: 采样数量，默认从全局配置读取
+            use_numba: 是否使用numba加速版本（默认True，如果numba不可用则自动降级）
+
         Returns:
             {timestep: [reachable_cell_indices]} 每个时刻的可达集
         """
+        # 如果numba可用且use_numba=True，使用优化版本
+        if use_numba and NUMBA_AVAILABLE:
+            return self._multi_timestep_successor_cells_numba(agent, horizon, dt, n_samples)
+        else:
+            # 使用原始版本
+            return self._multi_timestep_successor_cells_original(agent, horizon, dt, n_samples)
+
+    def _multi_timestep_successor_cells_original(self, agent: AgentState, horizon: Optional[int] = None,
+                                     dt: Optional[float] = None, n_samples: Optional[int] = None) -> Dict[int, List[int]]:
+        """原始版本的多时间步可达集计算（保留用于兼容性和fallback）
+
+        Args:
+            agent: 智能体当前状态
+            horizon: 预测时间步数，默认从全局配置读取
+            dt: 时间步长，默认从全局配置读取
+            n_samples: 采样数量，默认从全局配置读取
+
+        Returns:
+            {timestep: [reachable_cell_indices]} 每个时刻的可达集
+        """
+        # 从全局配置读取默认参数
+        if horizon is None or dt is None or n_samples is None:
+            from carla_c2osr.config import get_global_config
+            config = get_global_config()
+            if horizon is None:
+                horizon = config.time.default_horizon
+            if dt is None:
+                dt = config.time.dt
+            if n_samples is None:
+                n_samples = config.sampling.reachable_set_samples
+
         # 获取智能体动力学参数
         dynamics = AgentDynamicsParams.for_agent_type(agent.agent_type)
         
@@ -483,8 +567,328 @@ class GridMapper:
         avg_heading = heading + 0.5 * yaw_rate * dt
         new_pos_x = pos[0] + new_speed * math.cos(avg_heading) * dt
         new_pos_y = pos[1] + new_speed * math.sin(avg_heading) * dt
-        
+
         new_vel_x = new_speed * math.cos(new_heading)
         new_vel_y = new_speed * math.sin(new_heading)
-        
+
         return np.array([new_pos_x, new_pos_y]), np.array([new_vel_x, new_vel_y]), new_heading, new_speed
+
+    def _multi_timestep_successor_cells_numba(self, agent: AgentState, horizon: Optional[int] = None,
+                                            dt: Optional[float] = None, n_samples: Optional[int] = None) -> Dict[int, List[int]]:
+        """Numba优化版本的多时间步可达集计算（向量化批量处理）
+
+        Args:
+            agent: 智能体当前状态
+            horizon: 预测时间步数，默认从全局配置读取
+            dt: 时间步长，默认从全局配置读取
+            n_samples: 采样数量，默认从全局配置读取
+
+        Returns:
+            {timestep: [reachable_cell_indices]} 每个时刻的可达集
+        """
+        # 从全局配置读取默认参数
+        if horizon is None or dt is None or n_samples is None:
+            from carla_c2osr.config import get_global_config
+            config = get_global_config()
+            if horizon is None:
+                horizon = config.time.default_horizon
+            if dt is None:
+                dt = config.time.dt
+            if n_samples is None:
+                n_samples = config.sampling.reachable_set_samples
+
+        # 获取智能体动力学参数
+        dynamics = AgentDynamicsParams.for_agent_type(agent.agent_type)
+
+        # 提取初始状态
+        start_pos_x, start_pos_y = agent.position_m
+        start_vel_x, start_vel_y = agent.velocity_mps
+        start_heading = agent.heading_rad
+        start_speed = math.sqrt(start_vel_x**2 + start_vel_y**2)
+
+        # 确定是否是行人
+        is_pedestrian = (agent.agent_type == AgentType.PEDESTRIAN)
+
+        # 生成随机种子
+        random_seed = np.random.randint(0, 1000000)
+
+        # 计算所有时间步的可达集
+        reachable_sets = {}
+
+        for timestep in range(1, horizon + 1):
+            # 使用numba批量模拟到该时间步
+            final_pos_x, final_pos_y = _numba_simulate_trajectories_to_timestep(
+                start_pos_x, start_pos_y,
+                start_vel_x, start_vel_y,
+                start_heading, start_speed,
+                dynamics.max_accel_mps2, dynamics.max_decel_mps2, dynamics.max_speed_mps,
+                dynamics.max_yaw_rate_rps, dynamics.wheelbase_m,
+                dt, timestep, n_samples,
+                is_pedestrian, random_seed + timestep
+            )
+
+            # 批量转换坐标到网格索引
+            indices = _numba_xy_to_indices(
+                final_pos_x, final_pos_y,
+                self.world_center[0], self.world_center[1],
+                self.spec.size_m, self.spec.cell_m, self.side
+            )
+
+            # 去重并添加当前位置
+            reachable_indices = set(indices.tolist())
+            current_grid = self.to_grid_frame(agent.position_m)
+            current_idx = self.xy_to_index(current_grid)
+            reachable_indices.add(current_idx)
+
+            reachable_sets[timestep] = list(reachable_indices)
+
+        return reachable_sets
+
+    def get_neighbors(self, cell_idx: int, radius: int = 1) -> List[int]:
+        """获取网格单元的邻域
+
+        Args:
+            cell_idx: 中心单元索引
+            radius: 邻域半径（单元数）
+
+        Returns:
+            邻域单元索引列表（包括中心单元）
+        """
+        neighbors = []
+        iy_center = cell_idx // self.side
+        ix_center = cell_idx % self.side
+
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                iy = iy_center + dy
+                ix = ix_center + dx
+
+                # 边界检查
+                if 0 <= iy < self.side and 0 <= ix < self.side:
+                    neighbors.append(iy * self.side + ix)
+
+        return neighbors
+
+
+# ==================== Numba优化版本可达集计算 ====================
+
+@jit(nopython=True, cache=True)
+def _numba_pedestrian_dynamics_vectorized(
+    pos_x: np.ndarray, pos_y: np.ndarray,
+    vel_x: np.ndarray, vel_y: np.ndarray,
+    heading: np.ndarray, speed: np.ndarray,
+    max_accel: float, max_decel: float, max_speed: float,
+    dt: float, n_samples: int, random_seed: int
+) -> tuple:
+    """Numba优化的行人动力学批量计算（单步）
+
+    Args:
+        pos_x, pos_y: 位置数组 (n_samples,)
+        vel_x, vel_y: 速度数组 (n_samples,)
+        heading, speed: 朝向和速度数组 (n_samples,)
+        max_accel, max_decel, max_speed: 动力学参数
+        dt: 时间步长
+        n_samples: 样本数量
+        random_seed: 随机种子
+
+    Returns:
+        (new_pos_x, new_pos_y, new_vel_x, new_vel_y, new_heading, new_speed)
+    """
+    np.random.seed(random_seed)
+
+    # 采样加速度方向和大小
+    accel_angles = np.random.uniform(0, 2 * np.pi, n_samples)
+    accel_choice = np.random.uniform(0, 1, n_samples)
+
+    # 70% 加速，30% 减速
+    accel_mags = np.zeros(n_samples)
+    for i in range(n_samples):
+        if accel_choice[i] < 0.7:
+            accel_mags[i] = np.random.uniform(0, max_accel)
+        else:
+            accel_mags[i] = np.random.uniform(-max_decel, 0)
+
+    # 计算加速度分量
+    accel_x = accel_mags * np.cos(accel_angles)
+    accel_y = accel_mags * np.sin(accel_angles)
+
+    # 更新速度
+    new_vel_x = vel_x + accel_x * dt
+    new_vel_y = vel_y + accel_y * dt
+
+    # 限制速度
+    new_speeds = np.sqrt(new_vel_x**2 + new_vel_y**2)
+    for i in range(n_samples):
+        if new_speeds[i] > max_speed:
+            scale = max_speed / new_speeds[i]
+            new_vel_x[i] *= scale
+            new_vel_y[i] *= scale
+            new_speeds[i] = max_speed
+
+    # 更新位置
+    new_pos_x = pos_x + new_vel_x * dt
+    new_pos_y = pos_y + new_vel_y * dt
+
+    # 更新朝向
+    new_heading = np.arctan2(new_vel_y, new_vel_x)
+
+    return new_pos_x, new_pos_y, new_vel_x, new_vel_y, new_heading, new_speeds
+
+
+@jit(nopython=True, cache=True)
+def _numba_vehicle_dynamics_vectorized(
+    pos_x: np.ndarray, pos_y: np.ndarray,
+    vel_x: np.ndarray, vel_y: np.ndarray,
+    heading: np.ndarray, speed: np.ndarray,
+    max_accel: float, max_decel: float, max_speed: float,
+    max_yaw_rate: float, wheelbase: float,
+    dt: float, n_samples: int, random_seed: int
+) -> tuple:
+    """Numba优化的车辆动力学批量计算（单步）
+
+    Args:
+        pos_x, pos_y: 位置数组 (n_samples,)
+        vel_x, vel_y: 速度数组 (n_samples,)
+        heading, speed: 朝向和速度数组 (n_samples,)
+        max_accel, max_decel, max_speed: 动力学参数
+        max_yaw_rate: 最大偏航角速度
+        wheelbase: 轴距
+        dt: 时间步长
+        n_samples: 样本数量
+        random_seed: 随机种子
+
+    Returns:
+        (new_pos_x, new_pos_y, new_vel_x, new_vel_y, new_heading, new_speed)
+    """
+    np.random.seed(random_seed)
+
+    # 采样加速度
+    accel_choice = np.random.uniform(0, 1, n_samples)
+    accels = np.zeros(n_samples)
+    for i in range(n_samples):
+        if accel_choice[i] < 0.6:
+            accels[i] = np.random.uniform(-0.5, max_accel)
+        else:
+            accels[i] = np.random.uniform(-max_decel, 0)
+
+    # 计算新速度
+    new_speeds = speed + accels * dt
+    for i in range(n_samples):
+        new_speeds[i] = max(0.0, min(new_speeds[i], max_speed))
+
+    # 采样转向角
+    steer_angles = np.zeros(n_samples)
+    for i in range(n_samples):
+        if wheelbase > 0:
+            max_steer = np.arctan(max_yaw_rate * wheelbase / max(speed[i], 0.1))
+            max_steer = min(max_steer, np.pi / 6)
+        else:
+            max_steer = max_yaw_rate * dt
+        steer_angles[i] = np.random.uniform(-max_steer, max_steer)
+
+    # 计算偏航角速度
+    yaw_rates = np.zeros(n_samples)
+    for i in range(n_samples):
+        if wheelbase > 0:
+            yaw_rates[i] = new_speeds[i] * np.tan(steer_angles[i]) / wheelbase
+        else:
+            yaw_rates[i] = steer_angles[i] / dt
+        # numba不支持np.clip标量，使用min/max
+        yaw_rates[i] = max(-max_yaw_rate, min(yaw_rates[i], max_yaw_rate))
+
+    # 更新朝向
+    new_heading = heading + yaw_rates * dt
+
+    # 更新位置
+    avg_heading = heading + 0.5 * yaw_rates * dt
+    new_pos_x = pos_x + new_speeds * np.cos(avg_heading) * dt
+    new_pos_y = pos_y + new_speeds * np.sin(avg_heading) * dt
+
+    # 更新速度分量
+    new_vel_x = new_speeds * np.cos(new_heading)
+    new_vel_y = new_speeds * np.sin(new_heading)
+
+    return new_pos_x, new_pos_y, new_vel_x, new_vel_y, new_heading, new_speeds
+
+
+@jit(nopython=True, cache=True)
+def _numba_simulate_trajectories_to_timestep(
+    start_pos_x: float, start_pos_y: float,
+    start_vel_x: float, start_vel_y: float,
+    start_heading: float, start_speed: float,
+    max_accel: float, max_decel: float, max_speed: float,
+    max_yaw_rate: float, wheelbase: float,
+    dt: float, target_timestep: int, n_samples: int,
+    is_pedestrian: bool, random_seed: int
+) -> tuple:
+    """Numba优化的批量轨迹模拟到指定时间步
+
+    Returns:
+        (final_pos_x, final_pos_y): 形状为(n_samples,)的数组
+    """
+    # 初始化状态数组
+    pos_x = np.full(n_samples, start_pos_x, dtype=np.float64)
+    pos_y = np.full(n_samples, start_pos_y, dtype=np.float64)
+    vel_x = np.full(n_samples, start_vel_x, dtype=np.float64)
+    vel_y = np.full(n_samples, start_vel_y, dtype=np.float64)
+    heading = np.full(n_samples, start_heading, dtype=np.float64)
+    speed = np.full(n_samples, start_speed, dtype=np.float64)
+
+    # 逐步模拟到目标时间步
+    for step in range(target_timestep):
+        # 每步使用不同的随机种子
+        step_seed = random_seed + step * 1000
+
+        if is_pedestrian:
+            pos_x, pos_y, vel_x, vel_y, heading, speed = _numba_pedestrian_dynamics_vectorized(
+                pos_x, pos_y, vel_x, vel_y, heading, speed,
+                max_accel, max_decel, max_speed, dt, n_samples, step_seed
+            )
+        else:
+            pos_x, pos_y, vel_x, vel_y, heading, speed = _numba_vehicle_dynamics_vectorized(
+                pos_x, pos_y, vel_x, vel_y, heading, speed,
+                max_accel, max_decel, max_speed, max_yaw_rate, wheelbase,
+                dt, n_samples, step_seed
+            )
+
+    return pos_x, pos_y
+
+
+@jit(nopython=True, cache=True)
+def _numba_xy_to_indices(
+    pos_x: np.ndarray, pos_y: np.ndarray,
+    world_center_x: float, world_center_y: float,
+    grid_size_m: float, cell_size_m: float, grid_side: int
+) -> np.ndarray:
+    """Numba优化的批量坐标到网格索引转换
+
+    Args:
+        pos_x, pos_y: 位置数组
+        world_center_x, world_center_y: 网格世界中心
+        grid_size_m: 网格尺寸
+        cell_size_m: 单元尺寸
+        grid_side: 网格边长
+
+    Returns:
+        indices: 网格索引数组 (n_samples,)
+    """
+    n_samples = len(pos_x)
+    indices = np.zeros(n_samples, dtype=np.int32)
+    half = grid_size_m / 2.0
+
+    for i in range(n_samples):
+        # 转换到网格坐标
+        x_grid = pos_x[i] - world_center_x
+        y_grid = pos_y[i] - world_center_y
+
+        # 转换到索引
+        ix = int((x_grid + half) / cell_size_m)
+        iy = int((y_grid + half) / cell_size_m)
+
+        # Clamp到边界
+        ix = max(0, min(grid_side - 1, ix))
+        iy = max(0, min(grid_side - 1, iy))
+
+        indices[i] = iy * grid_side + ix
+
+    return indices

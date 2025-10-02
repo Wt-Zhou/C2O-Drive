@@ -49,8 +49,8 @@ class VehicleShape:
         return world_corners
 
 
-class CollisionDetector:
-    """精确的碰撞检测器"""
+class ShapeBasedCollisionDetector:
+    """基于精确车辆形状的碰撞检测器"""
     
     def __init__(self):
         """初始化碰撞检测器"""

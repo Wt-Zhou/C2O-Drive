@@ -15,11 +15,11 @@ if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
 from carla_c2osr.env.types import AgentState, EgoState, WorldState, AgentType
-from carla_c2osr.evaluation.rewards import RewardCalculator, CollisionDetector
+from carla_c2osr.evaluation.rewards import RewardCalculator, DistanceBasedCollisionDetector
 from carla_c2osr.evaluation.q_evaluator import QEvaluator
 from carla_c2osr.evaluation.buffer_analyzer import BufferAnalyzer
-from carla_c2osr.utils.trajectory_generator import TrajectoryGenerator
-from carla_c2osr.utils.scenario_manager import ScenarioManager
+from carla_c2osr.utils.simple_trajectory_generator import SimpleTrajectoryGenerator
+from carla_c2osr.env.scenario_manager import ScenarioManager
 from carla_c2osr.agents.c2osr.trajectory_buffer import ScenarioState
 
 
@@ -70,15 +70,15 @@ class TestRewardCalculator:
 
 class TestCollisionDetector:
     """测试碰撞检测器"""
-    
+
     def test_collision_detector_initialization(self):
         """测试碰撞检测器初始化"""
-        detector = CollisionDetector()
+        detector = DistanceBasedCollisionDetector()
         assert detector.collision_threshold == 0.1
-    
+
     def test_collision_detection(self):
         """测试碰撞检测"""
-        detector = CollisionDetector(collision_threshold=0.1)
+        detector = DistanceBasedCollisionDetector(collision_threshold=0.1)
         
         # 碰撞情况
         collision = detector.check_collision(

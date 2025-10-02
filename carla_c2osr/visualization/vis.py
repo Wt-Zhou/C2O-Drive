@@ -3,6 +3,11 @@ from typing import List, Dict
 import numpy as np
 import matplotlib.pyplot as plt
 import imageio
+import warnings
+
+# 配置matplotlib - 禁用中文字体警告
+warnings.filterwarnings('ignore', message='Glyph.*missing from current font')
+plt.rcParams['axes.unicode_minus'] = False
 
 
 def grid_heatmap(
@@ -216,7 +221,7 @@ def grid_heatmap(
     
     # 添加颜色条
     cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label('占据概率')
+    cbar.set_label('Probability')
     
     plt.tight_layout()
     plt.savefig(out_path, dpi=150, bbox_inches='tight')
@@ -246,18 +251,21 @@ def make_gif(frame_paths: List[str], out_path: str, fps: int = 2) -> None:
         print("错误: 没有有效的图像可以生成GIF")
         return
     
-    # 检查所有图像是否具有相同的尺寸
+    # 统一所有图像尺寸
+    from PIL import Image
     first_shape = images[0].shape
-    valid_images = [images[0]]
-    
-    for i, img in enumerate(images[1:], 1):
-        if img.shape == first_shape:
-            valid_images.append(img)
-        else:
-            print(f"警告: 跳过尺寸不匹配的图像 {frame_paths[i]} (期望: {first_shape}, 实际: {img.shape})")
-    
+    valid_images = []
+
+    for img in images:
+        if img.shape != first_shape:
+            # resize到统一尺寸
+            pil_img = Image.fromarray(img)
+            pil_img = pil_img.resize((first_shape[1], first_shape[0]), Image.LANCZOS)
+            img = np.array(pil_img)
+        valid_images.append(img)
+
     if not valid_images:
-        print("错误: 没有尺寸一致的图像可以生成GIF")
+        print("错误: 没有有效的图像")
         return
     
     # 计算duration（毫秒）

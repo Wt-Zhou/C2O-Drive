@@ -6,19 +6,19 @@ Q值评估模块
 
 from __future__ import annotations
 import numpy as np
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Union
 from carla_c2osr.env.types import EgoState, AgentState
 from carla_c2osr.agents.c2osr.grid import GridMapper
 from carla_c2osr.agents.c2osr.spatial_dirichlet import SpatialDirichletBank
-from carla_c2osr.evaluation.rewards import RewardCalculator, CollisionDetector
+from carla_c2osr.evaluation.rewards import RewardCalculator, DistanceBasedCollisionDetector
 
 
 class QEvaluator:
     """Q值评估器"""
     
-    def __init__(self, 
+    def __init__(self,
                  reward_calculator: Optional[RewardCalculator] = None,
-                 collision_detector: Optional[CollisionDetector] = None,
+                 collision_detector: Optional[DistanceBasedCollisionDetector] = None,
                  default_n_samples: int = 10):
         """
         Args:
@@ -27,23 +27,24 @@ class QEvaluator:
             default_n_samples: 默认采样数量
         """
         self.reward_calculator = reward_calculator or RewardCalculator()
-        self.collision_detector = collision_detector or CollisionDetector()
+        self.collision_detector = collision_detector or DistanceBasedCollisionDetector()
         self.default_n_samples = default_n_samples
     
-    def evaluate_q_values(self, 
-                         bank: SpatialDirichletBank, 
-                         agent_id: int, 
+    def evaluate_q_values(self,
+                         bank: SpatialDirichletBank,
+                         agent_id: int,
                          reachable: List[int],
-                         ego_state: EgoState, 
+                         ego_state: EgoState,
                          ego_next_state: EgoState,
-                         agent_state: AgentState, 
+                         agent_state: AgentState,
                          grid: GridMapper,
-                         ego_trajectory_cells: List[int], 
+                         ego_trajectory_cells: List[int],
                          n_samples: Optional[int] = None,
                          rng: Optional[np.random.Generator] = None,
-                         verbose: bool = False) -> List[float]:
+                         verbose: bool = False,
+                         reference_path: Optional[List[Union[Tuple[float, float], np.ndarray]]] = None) -> List[float]:
         """评估智能体在当前状态下的Q值（reward期望）。
-        
+
         Args:
             bank: Dirichlet Bank
             agent_id: 智能体ID
@@ -56,7 +57,8 @@ class QEvaluator:
             n_samples: 采样数量
             rng: 随机数生成器
             verbose: 是否打印详细信息
-            
+            reference_path: 参考中心线路径，用于计算偏移惩罚
+
         Returns:
             n个采样对应的reward值列表
         """
@@ -72,45 +74,56 @@ class QEvaluator:
         # 从Dirichlet分布采样n次
         sampled_probs = rng.dirichlet(alpha, size=n_samples)
         
-        # 检查自车未来轨迹是否与agent可达集重叠
-        overlap_cells = set(ego_trajectory_cells) & set(reachable)
-        has_overlap = len(overlap_cells) > 0
-        
+        # 早期检查：自车轨迹是否与agent可达集重叠
+        overlap_exists = bool(set(ego_trajectory_cells) & set(reachable))
+
         if verbose:
             print(f"    Agent {agent_id} 可达集大小: {len(reachable)}, 自车轨迹格子: {ego_trajectory_cells}")
-            print(f"    重叠格子: {list(overlap_cells) if has_overlap else '无重叠'}")
-        
+            if overlap_exists:
+                overlap_cells = set(ego_trajectory_cells) & set(reachable)
+                print(f"    检测到重叠格子: {list(overlap_cells)}")
+            else:
+                print(f"    无重叠 - 跳过碰撞检测")
+
         rewards = []
+        gamma = self.reward_calculator.gamma
+
         for i, probs in enumerate(sampled_probs):
             # 提取可达集上的概率分布
             reachable_probs = probs[reachable]
-            
-            # 计算碰撞概率
-            collision_prob, collision_count = self.collision_detector.calculate_collision_probability(
-                reachable_probs, reachable, overlap_cells
-            )
-            
-            # 判断是否发生碰撞
-            collision = collision_prob > self.collision_detector.collision_threshold
-            
-            # 创建智能体下一状态（简化，只更新位置）
-            # 这里我们简化处理，使用当前状态作为下一状态
+
+            # 计算时序碰撞概率（考虑折扣因子）
+            if overlap_exists:
+                collision_prob, collision_count, collision_details = \
+                    self.collision_detector.calculate_temporal_collision_probability(
+                        reachable_probs, reachable, ego_trajectory_cells, gamma
+                    )
+            else:
+                # 无重叠，跳过碰撞检测
+                collision_prob = 0.0
+                collision_count = 0
+                collision_details = []
+
+            # 创建智能体下一状态（简化，使用当前状态）
             agent_next_state = agent_state
-            
-            # 使用reward计算器计算reward
+
+            # 使用reward计算器计算reward（基于概率的碰撞惩罚 + 中心线偏移）
             reward = self.reward_calculator.calculate_reward(
                 ego_state=ego_state,
                 ego_next_state=ego_next_state,
                 agent_state=agent_state,
                 agent_next_state=agent_next_state,
-                collision=collision
+                collision_probability=collision_prob,
+                reference_path=reference_path
             )
-            
+
             rewards.append(reward)
-            
+
             if verbose:
-                print(f"      采样{i+1}: 碰撞概率{collision_prob:.3f}, 碰撞格子数{collision_count}, "
-                      f"碰撞{collision}, 总reward{reward:.2f}")
+                print(f"      采样{i+1}: 加权碰撞概率{collision_prob:.3f}, 碰撞格子数{collision_count}, "
+                      f"总reward{reward:.2f}")
+                if collision_details:
+                    print(f"        碰撞详情: {collision_details[:3]}...")  # 只显示前3个
         
         return rewards
     

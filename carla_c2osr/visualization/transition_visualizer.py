@@ -228,7 +228,7 @@ def _create_timestep_transition_visualization(
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
     
-    print(f"  📊 Transition分布可视化已保存: {output_path}")
+    # print(f"  📊 Transition分布可视化已保存: {output_path}")
 
 
 def visualize_dirichlet_distributions(
@@ -367,7 +367,7 @@ def _create_timestep_dirichlet_visualization(
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
     
-    print(f"  📊 Dirichlet分布可视化已保存: {output_path}")
+    # print(f"  📊 Dirichlet分布可视化已保存: {output_path}")
 
 
 def _create_grid_transition_visualization(
@@ -451,5 +451,5 @@ def _create_grid_transition_visualization(
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
     
-    print(f"  📊 网格Transition分布可视化已保存: {output_path}")
+    # print(f"  📊 网格Transition分布可视化已保存: {output_path}")
 

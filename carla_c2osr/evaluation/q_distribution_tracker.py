@@ -1,27 +1,24 @@
 """
-Q值分布追踪和可视化模块
-
-用于跟踪和可视化Q值分布随episode的变化。
+简化的Q值分布追踪器
 """
 
-from __future__ import annotations
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib
-from typing import List, Dict, Tuple, Optional
-from pathlib import Path
+from typing import List, Dict, Tuple
 import json
+import os
 
 
 class QDistributionTracker:
-    """Q值分布追踪器"""
+    """Q值分布追踪器 - 简化版本"""
     
     def __init__(self):
-        self.episode_data: List[Dict] = []
-        self.q_value_history: List[float] = []
-        self.q_distribution_history: List[List[float]] = []
-        self.collision_rate_history: List[float] = []
-        self.detailed_info_history: List[Dict] = []
+        """初始化追踪器"""
+        self.episode_data = []
+        self.q_value_history = []
+        self.q_distribution_history = []
+        self.collision_rate_history = []
+        self.detailed_info_history = []
     
     def add_episode_data(self, episode_id: int, q_value: float, q_distribution: List[float], 
                         collision_rate: float, detailed_info: Dict):
@@ -40,188 +37,171 @@ class QDistributionTracker:
         self.detailed_info_history.append(detailed_info)
     
     def plot_q_distribution_evolution(self, output_path: str, 
-                                    figsize: Tuple[int, int] = (15, 10)) -> None:
-        """绘制Q值分布随episode的演化图"""
+                                    figsize: Tuple[int, int] = (15, 8)) -> None:
+        """绘制所有Q值随episode变化的曲线图"""
         if len(self.q_distribution_history) == 0:
             print("没有Q值分布数据可绘制")
             return
         
-        # 设置中文字体
-        try:
-            plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
-            plt.rcParams['axes.unicode_minus'] = False
-        except:
-            pass
-        
-        fig, axes = plt.subplots(2, 2, figsize=figsize)
-        fig.suptitle('Q值分布演化分析', fontsize=16, fontweight='bold')
-        
-        # 1. Q值分布热力图
-        ax1 = axes[0, 0]
-        if len(self.q_distribution_history) > 1:
-            try:
-                # 检查并统一数组长度
-                max_len = max(len(dist) for dist in self.q_distribution_history)
-                
-                # 填充较短的数组到相同长度
-                padded_distributions = []
-                for dist in self.q_distribution_history:
-                    if len(dist) < max_len:
-                        padded = list(dist) + [0.0] * (max_len - len(dist))
-                    else:
-                        padded = list(dist)
-                    padded_distributions.append(padded)
-                
-                # 转换为矩阵形式
-                q_matrix = np.array(padded_distributions).T
-                im1 = ax1.imshow(q_matrix, aspect='auto', cmap='viridis', origin='lower')
-                ax1.set_xlabel('Episode')
-                ax1.set_ylabel('Sample Index')
-                ax1.set_title('Q值分布热力图')
-                plt.colorbar(im1, ax=ax1, label='Q Value')
-            except Exception as e:
-                ax1.text(0.5, 0.5, f'Q值分布矩阵创建失败:\n{str(e)}', ha='center', va='center', 
-                        transform=ax1.transAxes, fontsize=10)
-                ax1.set_title('Q值分布热力图 (创建失败)')
-        else:
-            ax1.text(0.5, 0.5, '需要至少2个episode的数据', ha='center', va='center', transform=ax1.transAxes)
-            ax1.set_title('Q值分布热力图 (数据不足)')
-        
-        # 2. 平均Q值变化
-        ax2 = axes[0, 1]
-        episodes = list(range(len(self.q_value_history)))
-        ax2.plot(episodes, self.q_value_history, 'b-o', linewidth=2, markersize=6)
-        ax2.set_xlabel('Episode')
-        ax2.set_ylabel('Average Q Value')
-        ax2.set_title('平均Q值变化趋势')
-        ax2.grid(True, alpha=0.3)
-        
-        # 3. Q值分布统计信息
-        ax3 = axes[1, 0]
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+
+        # Plot all Q-value samples for each episode
+        episodes = list(range(len(self.q_distribution_history)))
+
+        # Create color map
+        colors = plt.cm.viridis(np.linspace(0, 1, len(episodes)))
+
+        for episode_idx, q_distribution in enumerate(self.q_distribution_history):
+            # Plot all samples for each episode
+            episode_points = [episode_idx] * len(q_distribution)
+            ax.scatter(episode_points, q_distribution, alpha=0.6, s=15,
+                      color=colors[episode_idx], label=f'Episode {episode_idx}' if episode_idx < 10 else "")
+
+        # Plot mean Q-value trend line
+        ax.plot(episodes, self.q_value_history, 'r-o', linewidth=3, markersize=8,
+               label='Mean Q-value', zorder=10)
+
+        # Calculate and plot standard deviation band
         if len(self.q_distribution_history) > 0:
-            q_means = [np.mean(dist) for dist in self.q_distribution_history]
-            q_stds = [np.std(dist) for dist in self.q_distribution_history]
-            q_mins = [np.min(dist) for dist in self.q_distribution_history]
-            q_maxs = [np.max(dist) for dist in self.q_distribution_history]
-            
-            ax3.plot(episodes, q_means, 'g-o', label='Mean', linewidth=2)
-            ax3.fill_between(episodes, 
-                           [m - s for m, s in zip(q_means, q_stds)], 
-                           [m + s for m, s in zip(q_means, q_stds)], 
-                           alpha=0.3, color='green', label='±1 Std')
-            ax3.plot(episodes, q_mins, 'r--', label='Min', alpha=0.7)
-            ax3.plot(episodes, q_maxs, 'b--', label='Max', alpha=0.7)
-            
-            ax3.set_xlabel('Episode')
-            ax3.set_ylabel('Q Value')
-            ax3.set_title('Q值分布统计')
-            ax3.legend()
-            ax3.grid(True, alpha=0.3)
-        else:
-            ax3.text(0.5, 0.5, '无Q值分布数据', ha='center', va='center', transform=ax3.transAxes)
-        
-        # 4. 碰撞率变化
-        ax4 = axes[1, 1]
-        if len(self.collision_rate_history) > 0:
-            ax4.plot(episodes, self.collision_rate_history, 'r-o', linewidth=2, markersize=6)
-            ax4.set_xlabel('Episode')
-            ax4.set_ylabel('Collision Rate')
-            ax4.set_title('碰撞率变化趋势')
-            ax4.set_ylim([0, 1])
-            ax4.grid(True, alpha=0.3)
-        else:
-            ax4.text(0.5, 0.5, '无碰撞率数据', ha='center', va='center', transform=ax4.transAxes)
+            try:
+                means = self.q_value_history
+                stds = []
+                for dist in self.q_distribution_history:
+                    if len(dist) > 0:
+                        stds.append(np.std(dist))
+                    else:
+                        stds.append(0.0)
+
+                # Plot std band
+                upper_bound = [m + s for m, s in zip(means, stds)]
+                lower_bound = [m - s for m, s in zip(means, stds)]
+                ax.fill_between(episodes, lower_bound, upper_bound, alpha=0.2, color='red', label='±1 Std')
+
+            except Exception as e:
+                print(f"Std calculation failed: {e}")
+
+        ax.set_xlabel('Episode', fontsize=12)
+        ax.set_ylabel('Q Value', fontsize=12)
+        ax.set_title('Q-Value Distribution Evolution across Episodes', fontsize=14, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+
+        # Show only key legend items
+        handles, labels = ax.get_legend_handles_labels()
+        key_handles = [h for h, l in zip(handles, labels) if 'Mean' in l or 'Std' in l]
+        key_labels = [l for l in labels if 'Mean' in l or 'Std' in l]
+        ax.legend(key_handles, key_labels, loc='upper right')
+
+        # Add statistics text
+        if len(self.q_value_history) > 0:
+            overall_mean = np.mean(self.q_value_history)
+            overall_std = np.std(self.q_value_history)
+            max_collision_rate = max(self.collision_rate_history) if self.collision_rate_history else 0
+
+            stats_text = f'Statistics:\nMean Q: {overall_mean:.2f}\nStd: {overall_std:.2f}\nMax Collision: {max_collision_rate:.3f}'
+            ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=10,
+                   verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
         
         plt.tight_layout()
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
         
         print(f"Q值分布演化图已保存到: {output_path}")
     
-    def plot_q_value_boxplot(self, output_path: str, 
-                           figsize: Tuple[int, int] = (12, 8)) -> None:
-        """绘制每个episode的Q值分布箱线图"""
-        if len(self.q_distribution_history) == 0:
-            print("没有Q值分布数据可绘制")
+    def plot_collision_rate_evolution(self, output_path: str, 
+                                     figsize: Tuple[int, int] = (12, 6)) -> None:
+        """绘制碰撞率变化图"""
+        if len(self.collision_rate_history) == 0:
+            print("没有碰撞率数据可绘制")
             return
         
-        # 设置中文字体
-        try:
-            plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
-            plt.rcParams['axes.unicode_minus'] = False
-        except:
-            pass
-        
-        fig, ax = plt.subplots(figsize=figsize)
-        
-        # 创建箱线图
-        box_data = self.q_distribution_history
-        episode_labels = [f'Episode {i}' for i in range(len(box_data))]
-        
-        bp = ax.boxplot(box_data, labels=episode_labels, patch_artist=True)
-        
-        # 美化箱线图
-        colors = plt.cm.viridis(np.linspace(0, 1, len(bp['boxes'])))
-        for patch, color in zip(bp['boxes'], colors):
-            patch.set_facecolor(color)
-            patch.set_alpha(0.7)
-        
-        # 添加平均值点
-        means = [np.mean(dist) for dist in self.q_distribution_history]
-        ax.plot(range(1, len(means) + 1), means, 'ro-', linewidth=2, markersize=8, label='Mean')
-        
-        ax.set_xlabel('Episode')
-        ax.set_ylabel('Q Value')
-        ax.set_title('Q值分布箱线图 - 各Episode对比')
-        ax.legend()
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+
+        episodes = list(range(len(self.collision_rate_history)))
+
+        # Plot collision rate line
+        ax.plot(episodes, self.collision_rate_history, 'r-o', linewidth=3, markersize=8)
+
+        # Add zero baseline
+        ax.axhline(y=0, color='green', linestyle='--', alpha=0.7, label='Zero Collision')
+
+        # Mark collisions if any
+        for i, rate in enumerate(self.collision_rate_history):
+            if rate > 0:
+                ax.annotate(f'{rate:.3f}', (i, rate), textcoords="offset points",
+                           xytext=(0,10), ha='center', fontsize=9, color='red')
+
+        ax.set_xlabel('Episode', fontsize=12)
+        ax.set_ylabel('Collision Rate', fontsize=12)
+        ax.set_title('Collision Rate Evolution', fontsize=14, fontweight='bold')
+        ax.set_ylim([-0.05, max(1.05, max(self.collision_rate_history) + 0.1)])
         ax.grid(True, alpha=0.3)
+        ax.legend()
+
+        # Add statistics
+        total_collisions = sum(self.collision_rate_history)
+        avg_collision_rate = np.mean(self.collision_rate_history)
+
+        stats_text = f'Collision Stats:\nTotal: {total_collisions:.3f}\nAverage: {avg_collision_rate:.3f}'
+        ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=10,
+               verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
         
-        # 旋转x轴标签
-        plt.xticks(rotation=45)
         plt.tight_layout()
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
         
-        print(f"Q值分布箱线图已保存到: {output_path}")
+        print(f"碰撞率变化图已保存到: {output_path}")
     
-    def save_data(self, output_path: str) -> None:
+    def print_summary(self):
+        """打印统计摘要"""
+        if len(self.episode_data) == 0:
+            print("没有episode数据")
+            return
+        
+        print("\n" + "="*50)
+        print("Q值分布统计摘要")
+        print("="*50)
+        
+        # Q值统计
+        print(f"总Episodes: {len(self.q_value_history)}")
+        print(f"平均Q值: {np.mean(self.q_value_history):.4f}")
+        print(f"Q值标准差: {np.std(self.q_value_history):.4f}")
+        print(f"Q值范围: [{np.min(self.q_value_history):.4f}, {np.max(self.q_value_history):.4f}]")
+        
+        # 碰撞统计
+        print(f"\n碰撞率统计:")
+        print(f"平均碰撞率: {np.mean(self.collision_rate_history):.4f}")
+        print(f"最大碰撞率: {np.max(self.collision_rate_history):.4f}")
+        print(f"零碰撞Episodes: {sum(1 for rate in self.collision_rate_history if rate == 0.0)}/{len(self.collision_rate_history)}")
+        
+        # 分布统计
+        if self.q_distribution_history:
+            all_q_values = []
+            for dist in self.q_distribution_history:
+                all_q_values.extend(dist)
+            
+            print(f"\n所有样本统计:")
+            print(f"总样本数: {len(all_q_values)}")
+            print(f"样本平均值: {np.mean(all_q_values):.4f}")
+            print(f"样本标准差: {np.std(all_q_values):.4f}")
+        
+        print("="*50)
+    
+    def save_data(self, output_path: str):
         """保存数据到JSON文件"""
         data = {
             'episode_data': self.episode_data,
-            'summary': {
-                'total_episodes': len(self.episode_data),
-                'q_value_stats': {
-                    'mean': float(np.mean(self.q_value_history)) if self.q_value_history else 0,
-                    'std': float(np.std(self.q_value_history)) if self.q_value_history else 0,
-                    'min': float(np.min(self.q_value_history)) if self.q_value_history else 0,
-                    'max': float(np.max(self.q_value_history)) if self.q_value_history else 0
-                },
-                'collision_rate_stats': {
-                    'mean': float(np.mean(self.collision_rate_history)) if self.collision_rate_history else 0,
-                    'std': float(np.std(self.collision_rate_history)) if self.collision_rate_history else 0
-                }
+            'q_value_history': self.q_value_history,
+            'collision_rate_history': self.collision_rate_history,
+            'summary_stats': {
+                'total_episodes': len(self.q_value_history),
+                'mean_q_value': float(np.mean(self.q_value_history)) if self.q_value_history else 0,
+                'std_q_value': float(np.std(self.q_value_history)) if self.q_value_history else 0,
+                'mean_collision_rate': float(np.mean(self.collision_rate_history)) if self.collision_rate_history else 0
             }
         }
         
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+            json.dump(data, f, ensure_ascii=False, indent=2)
         
-        print(f"Q值分布数据已保存到: {output_path}")
-    
-    def print_summary(self) -> None:
-        """打印统计摘要"""
-        if len(self.q_value_history) == 0:
-            print("没有Q值数据")
-            return
-        
-        print("\n=== Q值分布统计摘要 ===")
-        print(f"Episode数量: {len(self.q_value_history)}")
-        print(f"平均Q值: {np.mean(self.q_value_history):.3f} ± {np.std(self.q_value_history):.3f}")
-        print(f"Q值范围: [{np.min(self.q_value_history):.3f}, {np.max(self.q_value_history):.3f}]")
-        print(f"平均碰撞率: {np.mean(self.collision_rate_history):.3f} ± {np.std(self.collision_rate_history):.3f}")
-        
-        # 最后几个episode的趋势
-        if len(self.q_value_history) >= 3:
-            recent_trend = np.polyfit(range(len(self.q_value_history)), self.q_value_history, 1)[0]
-            trend_desc = "上升" if recent_trend > 0 else "下降" if recent_trend < 0 else "稳定"
-            print(f"Q值趋势: {trend_desc} (斜率: {recent_trend:.4f})")
+        print(f"数据已保存到: {output_path}")

@@ -65,24 +65,35 @@ class AgentTrajectoryData:
 
 class HighPerformanceTrajectoryBuffer:
     """高性能MDP状态-动作匹配的轨迹缓冲区"""
-    
-    def __init__(self, horizon: int, 
-                 spatial_resolution: float = 2.0,  # 空间索引精度
-                 ego_action_resolution: float = 1.0):  # 动作索引精度
+
+    def __init__(self, horizon: Optional[int] = None,
+                 spatial_resolution: Optional[float] = None,
+                 ego_action_resolution: Optional[float] = None):
+        # 从全局配置读取参数
+        from carla_c2osr.config import get_global_config
+        config = get_global_config()
+
+        if horizon is None:
+            horizon = config.time.default_horizon
+        if spatial_resolution is None:
+            spatial_resolution = config.matching.spatial_resolution
+        if ego_action_resolution is None:
+            ego_action_resolution = config.matching.ego_action_resolution
+
         self.horizon = horizon
-        
+
         # 主存储：agent_id -> List[AgentEpisodeData]
         self._agent_episodes: Dict[int, List[AgentEpisodeData]] = {}
-        
+
         # 一级索引：按agent数量快速过滤
         self._agent_count_index: Dict[int, Set[int]] = {}  # agent_count -> set(episode_ids)
-        
+
         # 二级索引：按自车初始位置空间分区
         self._ego_spatial_index: Dict[Tuple[int, int], Set[int]] = {}  # (grid_x, grid_y) -> set(episode_ids)
-        
+
         # 三级索引：按自车动作轨迹特征（可选，用于极端性能要求）
         self._ego_action_index: Dict[str, Set[int]] = {}  # action_signature -> set(episode_ids)
-        
+
         # 索引参数
         self.spatial_resolution = spatial_resolution
         self.ego_action_resolution = ego_action_resolution
@@ -184,46 +195,62 @@ class HighPerformanceTrajectoryBuffer:
         current_ego_state: Tuple[float, float, float],  # (x, y, heading)
         current_agents_states: List[Tuple[float, float, float, float, float, str]],
         ego_action_trajectory: List[Tuple[float, float]],
-        
+
         # 匹配阈值
         ego_state_threshold: float = 3.0,
-        agents_state_threshold: float = 3.0, 
-        ego_action_threshold: float = 2.0
-        
+        agents_state_threshold: float = 3.0,
+        ego_action_threshold: float = 2.0,
+
+        # 调试选项
+        debug: bool = False
+
     ) -> Dict[int, List[int]]:  # {timestep: [agent_cells]}
         """严格匹配的历史轨迹检索"""
-        
-        results: Dict[int, List[int]] = {t: [] for t in range(self.horizon)}
-        
+
+        results: Dict[int, List[int]] = {t: [] for t in range(1, self.horizon + 1)}
+
         if agent_id not in self._agent_episodes:
+            if debug:
+                print(f"  [Debug] Agent {agent_id} 没有历史数据")
             return results
-        
+
         # 第一步：多级索引快速过滤候选episodes
         candidate_episodes = self._filter_candidates_with_index(
-            len(current_agents_states), 
+            len(current_agents_states),
             current_ego_state[:2],
             ego_action_trajectory,
             agent_id
         )
+
+        if debug:
+            print(f"  [Debug] Agent {agent_id}: 索引过滤后有 {len(candidate_episodes)} 个候选episodes")
         
         # 第二步：对候选episodes进行严格匹配
+        total_matched_timesteps = 0
         for episode_data in candidate_episodes:
             # 严格匹配MDP状态-动作
             matched_timesteps = self._strict_match_mdp(
                 episode_data,
                 current_ego_state,
-                current_agents_states, 
+                current_agents_states,
                 ego_action_trajectory,
                 ego_state_threshold,
                 agents_state_threshold,
                 ego_action_threshold
             )
-            
+
             # 将匹配成功的时间步数据加入结果
             for t in matched_timesteps:
-                if t < len(episode_data.agent_trajectory_cells):
-                    results[t].append(episode_data.agent_trajectory_cells[t])
-        
+                # t从1开始,需要转换为agent_trajectory_cells的索引(从0开始)
+                cell_idx = t - 1
+                if cell_idx < len(episode_data.agent_trajectory_cells):
+                    results[t].append(episode_data.agent_trajectory_cells[cell_idx])
+                    total_matched_timesteps += 1
+
+        if debug:
+            total_cells = sum(len(cells) for cells in results.values())
+            print(f"  [Debug] Agent {agent_id}: 匹配成功 {total_matched_timesteps} 个时间步, 总计 {total_cells} 个历史cells")
+
         return results
 
     def _filter_candidates_with_index(self, agent_count, ego_pos, ego_action, agent_id):
@@ -248,10 +275,12 @@ class HighPerformanceTrajectoryBuffer:
         candidate_episode_ids &= spatial_candidates
         
         # 三级过滤：自车动作特征匹配（可选）
+        # 注意：只在索引中有该签名时才过滤，否则跳过此级过滤避免丢失数据
         if self._ego_action_index:
             action_sig = self._get_action_signature(ego_action)
             if action_sig in self._ego_action_index:
                 candidate_episode_ids &= self._ego_action_index[action_sig]
+            # 如果action_sig不在索引中，保留所有候选（不过滤）
         
         # 根据episode_id获取实际的episode数据（只返回指定agent的episodes）
         candidates = []
@@ -286,12 +315,12 @@ class HighPerformanceTrajectoryBuffer:
         # 3. 逐时间步自车动作匹配
         for t in range(min(len(ego_action), len(historical_mdp.ego_action_trajectory))):
             action_diff = np.linalg.norm(
-                np.array(ego_action[t]) - 
+                np.array(ego_action[t]) -
                 np.array(historical_mdp.ego_action_trajectory[t])
             )
-            
+
             if action_diff <= action_thresh:
-                matched_timesteps.append(t)
+                matched_timesteps.append(t + 1)  # timestep从1开始,与reachable_sets对齐
         
         return matched_timesteps
 
@@ -415,10 +444,15 @@ class HighPerformanceTrajectoryBuffer:
                 episode_id=episode_id
             )
 
-    def store_episode_trajectories_by_timestep(self, episode_id: int, 
+    def store_episode_trajectories_by_timestep(self, episode_id: int,
                                              timestep_scenarios: List[Tuple[ScenarioState, List[AgentTrajectoryData]]],
                                              ego_trajectory: List[Tuple[float, float]] = None) -> None:
-        """向后兼容的按时间步存储接口"""
+        """向后兼容的按时间步存储接口（支持数据增强倍数）"""
+        # 从全局配置读取存储倍数
+        from carla_c2osr.config import get_global_config
+        config = get_global_config()
+        storage_multiplier = config.matching.trajectory_storage_multiplier
+
         for timestep, (scenario_state, trajectories_data) in enumerate(timestep_scenarios):
             # 为每个agent存储轨迹数据，使用timestep作为episode_id的一部分
             for traj_data in trajectories_data:
@@ -431,22 +465,24 @@ class HighPerformanceTrajectoryBuffer:
                 else:
                     # 回退到简化的当前位置
                     ego_action = [scenario_state.ego_position] * len(traj_data.trajectory_cells)
-                
+
                 # 创建initial ego state
                 initial_ego_state = (scenario_state.ego_position[0], scenario_state.ego_position[1], scenario_state.ego_heading)
-                
-                # 使用episode_id + timestep创建唯一标识
-                unique_episode_id = f"{episode_id}_t{timestep}"
-                
-                self.store_agent_episode(
-                    agent_id=traj_data.agent_id,
-                    agent_type=traj_data.agent_type,
-                    initial_ego_state=initial_ego_state,
-                    initial_agents_states=scenario_state.agents_states,
-                    ego_action_trajectory=ego_action,
-                    agent_trajectory_cells=traj_data.trajectory_cells,
-                    episode_id=hash(unique_episode_id)  # 转换为整数ID
-                )
+
+                # 根据存储倍数，重复存储多次
+                for rep_idx in range(storage_multiplier):
+                    # 使用episode_id + timestep + rep_idx创建唯一标识
+                    unique_episode_id = f"{episode_id}_t{timestep}_r{rep_idx}"
+
+                    self.store_agent_episode(
+                        agent_id=traj_data.agent_id,
+                        agent_type=traj_data.agent_type,
+                        initial_ego_state=initial_ego_state,
+                        initial_agents_states=scenario_state.agents_states,
+                        ego_action_trajectory=ego_action,
+                        agent_trajectory_cells=traj_data.trajectory_cells,
+                        episode_id=hash(unique_episode_id)  # 转换为整数ID
+                    )
 
     def clear(self) -> None:
         """清空buffer"""

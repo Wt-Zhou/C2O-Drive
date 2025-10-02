@@ -12,52 +12,43 @@ from carla_c2osr.env.types import EgoState, AgentState, WorldState, AgentType
 from carla_c2osr.agents.c2osr.grid import GridMapper
 from carla_c2osr.agents.c2osr.spatial_dirichlet import SpatialDirichletBank, DirichletParams, MultiTimestepSpatialDirichletBank, OptimizedMultiTimestepSpatialDirichletBank
 from carla_c2osr.agents.c2osr.trajectory_buffer import TrajectoryBuffer
-from carla_c2osr.config import get_global_config
-from carla_c2osr.evaluation.collision_detector import CollisionDetector
-
-
-@dataclass
-class RewardConfig:
-    """奖励函数配置"""
-    # 碰撞相关
-    collision_penalty: float = -100.0
-    collision_threshold: float = 0.1  # 碰撞概率阈值
-    
-    # 舒适性相关
-    acceleration_penalty_weight: float = 0.1
-    jerk_penalty_weight: float = 0.05
-    max_comfortable_accel: float = 2.0  # m/s²
-    
-    # 驾驶效率相关
-    speed_reward_weight: float = 1.0
-    target_speed: float = 5.0  # m/s
-    progress_reward_weight: float = 2.0
-    
-    # 安全距离相关
-    safe_distance: float = 3.0  # m
-    distance_penalty_weight: float = 2.0
+from carla_c2osr.config import get_global_config, RewardConfig
+from carla_c2osr.evaluation.collision_detector import ShapeBasedCollisionDetector
 
 
 @dataclass
 class QValueConfig:
-    """Q值计算配置"""
-    horizon: int = 8  # 预测时间步长
-    n_samples: int = 10  # Dirichlet采样数量
-    dirichlet_alpha_in: float = 50.0  # 可达集内的先验强度
-    dirichlet_alpha_out: float = 1e-6  # 可达集外的先验强度
-    learning_rate: float = 1.0  # 历史数据更新学习率
-    
+    """Q值计算配置
+
+    默认从全局配置读取参数。如果需要自定义,请显式传入参数值。
+    """
+    horizon: Optional[int] = None  # 预测时间步长
+    n_samples: Optional[int] = None  # Dirichlet采样数量
+    dirichlet_alpha_in: Optional[float] = None  # 可达集内的先验强度
+    dirichlet_alpha_out: Optional[float] = None  # 可达集外的先验强度
+    learning_rate: Optional[float] = None  # 历史数据更新学习率
+    q_selection_percentile: Optional[float] = None  # Q值选择百分位数（从全局配置读取）
+
+    def __post_init__(self):
+        """从全局配置读取未设置的参数"""
+        global_config = get_global_config()
+        if self.horizon is None:
+            self.horizon = global_config.time.default_horizon
+        if self.n_samples is None:
+            self.n_samples = global_config.sampling.q_value_samples
+        if self.dirichlet_alpha_in is None:
+            self.dirichlet_alpha_in = global_config.dirichlet.alpha_in
+        if self.dirichlet_alpha_out is None:
+            self.dirichlet_alpha_out = global_config.dirichlet.alpha_out
+        if self.learning_rate is None:
+            self.learning_rate = global_config.dirichlet.learning_rate
+        if self.q_selection_percentile is None:
+            self.q_selection_percentile = global_config.c2osr.q_selection_percentile
+
     @classmethod
     def from_global_config(cls):
-        """从全局配置创建Q值配置"""
-        global_config = get_global_config()
-        return cls(
-            horizon=global_config.time.default_horizon,
-            n_samples=global_config.sampling.q_value_samples,
-            dirichlet_alpha_in=global_config.dirichlet.alpha_in,
-            dirichlet_alpha_out=global_config.dirichlet.alpha_out,
-            learning_rate=global_config.dirichlet.learning_rate
-        )
+        """从全局配置创建Q值配置（向后兼容方法）"""
+        return cls()
 
 
 class RewardCalculator:
@@ -72,18 +63,27 @@ class RewardCalculator:
             return self.config.collision_penalty
         return 0.0
     
-    def calculate_comfort_reward(self, ego_trajectory: List[Tuple[float, float]], dt: float = 1.0) -> float:
-        """计算舒适性奖励（基于加速度和急动）"""
+    def calculate_comfort_reward(self, ego_trajectory: List[Tuple[float, float]], dt: Optional[float] = None) -> float:
+        """计算舒适性奖励（基于加速度和急动）
+
+        Args:
+            ego_trajectory: 自车轨迹
+            dt: 时间步长，默认从全局配置读取
+        """
+        if dt is None:
+            from carla_c2osr.config import get_global_config
+            dt = get_global_config().time.dt
+
         if len(ego_trajectory) < 3:
             return 0.0
-        
+
         reward = 0.0
-        
+
         # 计算加速度
         for i in range(1, len(ego_trajectory) - 1):
             v_prev = np.array(ego_trajectory[i]) - np.array(ego_trajectory[i-1])
             v_curr = np.array(ego_trajectory[i+1]) - np.array(ego_trajectory[i])
-            
+
             accel = (v_curr - v_prev) / dt
             accel_magnitude = np.linalg.norm(accel)
             
@@ -100,14 +100,23 @@ class RewardCalculator:
         
         return reward
     
-    def calculate_efficiency_reward(self, ego_trajectory: List[Tuple[float, float]], dt: float = 1.0) -> float:
-        """计算驾驶效率奖励（速度和前进距离）"""
+    def calculate_efficiency_reward(self, ego_trajectory: List[Tuple[float, float]], dt: Optional[float] = None) -> float:
+        """计算驾驶效率奖励（速度和前进距离）
+
+        Args:
+            ego_trajectory: 自车轨迹
+            dt: 时间步长，默认从全局配置读取
+        """
+        if dt is None:
+            from carla_c2osr.config import get_global_config
+            dt = get_global_config().time.dt
+
         if len(ego_trajectory) < 2:
             return 0.0
-        
+
         reward = 0.0
         total_distance = 0.0
-        
+
         for i in range(1, len(ego_trajectory)):
             # 计算速度
             velocity = np.array(ego_trajectory[i]) - np.array(ego_trajectory[i-1])
@@ -145,21 +154,48 @@ class RewardCalculator:
         
         return reward
     
+    def calculate_centerline_offset_reward(self, ego_trajectory: List[Tuple[float, float]],
+                                          reference_path: Optional[List] = None) -> float:
+        """计算中心线偏移奖励
+
+        Args:
+            ego_trajectory: 自车轨迹
+            reference_path: 参考路径（中心线）
+
+        Returns:
+            中心线偏移奖励（负值为惩罚）
+        """
+        if reference_path is None or len(reference_path) == 0:
+            return 0.0
+
+        from carla_c2osr.evaluation.rewards import calculate_distance_to_path
+
+        reward = 0.0
+        for pos in ego_trajectory:
+            offset = calculate_distance_to_path(pos, reference_path)
+            # 使用配置中的权重，如果没有则使用默认值
+            weight = getattr(self.config, 'centerline_offset_penalty_weight', 1.0)
+            reward -= offset * weight
+
+        return reward
+
     def calculate_total_reward(self, ego_trajectory: List[Tuple[float, float]],
                              agent_trajectories: Dict[int, List[Tuple[float, float]]],
-                             collision_occurred: bool) -> float:
+                             collision_occurred: bool,
+                             reference_path: Optional[List] = None) -> float:
         """计算总奖励"""
         collision_reward = self.calculate_collision_reward(collision_occurred)
-        
+
         # 如果发生碰撞，直接返回碰撞惩罚
         if collision_occurred:
             return collision_reward
-        
+
         comfort_reward = self.calculate_comfort_reward(ego_trajectory)
         efficiency_reward = self.calculate_efficiency_reward(ego_trajectory)
         safety_reward = self.calculate_safety_reward(ego_trajectory, agent_trajectories)
-        
-        return collision_reward + comfort_reward + efficiency_reward + safety_reward
+        centerline_reward = self.calculate_centerline_offset_reward(ego_trajectory, reference_path)
+
+        return collision_reward + comfort_reward + efficiency_reward + safety_reward + centerline_reward
 
 
 class QValueCalculator:
@@ -168,7 +204,7 @@ class QValueCalculator:
     def __init__(self, config: QValueConfig, reward_config: RewardConfig):
         self.config = config
         self.reward_config = reward_config
-        self.collision_detector = CollisionDetector()
+        self.collision_detector = ShapeBasedCollisionDetector()
         
         # 创建Dirichlet参数
         self.dirichlet_params = DirichletParams(
@@ -178,15 +214,16 @@ class QValueCalculator:
             cK=1.0
         )
     
-    def compute_q_value(self, 
+    def compute_q_value(self,
                        current_world_state: WorldState,
                        ego_action_trajectory: List[Tuple[float, float]],
                        trajectory_buffer: TrajectoryBuffer,
                        grid: GridMapper,
                        bank: Optional[MultiTimestepSpatialDirichletBank] = None,
-                       rng: Optional[np.random.Generator] = None) -> Tuple[List[float], Dict]:
+                       rng: Optional[np.random.Generator] = None,
+                       reference_path: Optional[List] = None) -> Tuple[List[float], Dict]:
         """终极优化的Q值计算 - 完全消除采样，纯期望计算
-        
+
         Args:
             current_world_state: 当前世界状态
             ego_action_trajectory: 自车动作序列（未来horizon个位置）
@@ -194,10 +231,13 @@ class QValueCalculator:
             grid: 网格映射器
             bank: 持久化的Dirichlet Bank（如果为None则创建临时Bank）
             rng: 随机数生成器（为了兼容性保留）
-            
+            reference_path: 参考路径（中心线），用于计算偏移惩罚
+
         Returns:
             (所有Q值列表, 详细信息字典)
         """
+        # 将 reference_path 存储为实例变量，供内部方法使用
+        self._reference_path = reference_path
         if rng is None:
             rng = np.random.default_rng()
         
@@ -214,21 +254,22 @@ class QValueCalculator:
         else:
             optimized_bank = bank
         
-        print(f"  🚀 === 终极优化Q值计算开始 ===")
-        
-        # 第1步：计算与agent完全无关的奖励（只计算一次！）
-        print(f"  📊 第1步: 计算agent无关奖励（固定值）")
+        # 获取verbose级别
+        from carla_c2osr.config import get_global_config
+        verbose = get_global_config().visualization.verbose_level
+
+        if verbose >= 2:
+            print(f"  🚀 === 终极优化Q值计算开始 ===")
+
+        # 第1步:计算与agent完全无关的奖励(只计算一次!)
         agent_independent_reward = self._calculate_agent_independent_rewards(ego_action_trajectory)
-        print(f"    ✅ Agent无关奖励: {agent_independent_reward:.3f}")
-        
-        # 第2步：建立agent的transition分布
-        print(f"  📈 第2步: 建立agent transition分布")
+
+        # 第2步:建立agent的transition分布
         agent_transition_samples = self._build_agent_transition_distributions(
             current_world_state, ego_action_trajectory, trajectory_buffer, grid, optimized_bank, horizon
         )
-        
-        # 第3步：直接计算期望的agent相关奖励（无采样！）
-        print(f"  🎯 第3步: 直接计算期望agent相关奖励（零采样）")
+
+        # 第3步:直接计算期望的agent相关奖励(无采样!)
         q_values = []
         collision_probabilities = []  # 收集所有样本的期望碰撞概率
         
@@ -278,22 +319,24 @@ class QValueCalculator:
             'agent_info': {}
         }
         
-        print(f"  🎉 === Q值计算完成 ===")
-        print(f"  方法: {detailed_info['calculation_method']}")
-        print(f"  基础奖励: {agent_independent_reward:.3f} (固定)")
-        print(f"  可变奖励范围: [{np.min(detailed_info['agent_dependent_rewards']):.3f}, "
-              f"{np.max(detailed_info['agent_dependent_rewards']):.3f}]")
-        print(f"  最终Q值: 均值={np.mean(q_values):.3f}, 标准差={np.std(q_values):.3f}")
-        print(f"  期望碰撞概率: {mean_collision_probability:.3f}")
-        print(f"  计算优化: {detailed_info['computational_savings']}")
+        if verbose >= 2:
+            print(f"  🎉 === Q值计算完成 ===")
+            print(f"  方法: {detailed_info['calculation_method']}")
+            print(f"  基础奖励: {agent_independent_reward:.3f} (固定)")
+            print(f"  可变奖励范围: [{np.min(detailed_info['agent_dependent_rewards']):.3f}, "
+                  f"{np.max(detailed_info['agent_dependent_rewards']):.3f}]")
+            print(f"  最终Q值: 均值={np.mean(q_values):.3f}, 标准差={np.std(q_values):.3f}")
+            print(f"  期望碰撞概率: {mean_collision_probability:.3f}")
+            print(f"  计算优化: {detailed_info['computational_savings']}")
         
         return q_values, detailed_info
     
     def _calculate_agent_independent_rewards(self, ego_trajectory: List[Tuple[float, float]]) -> float:
         """计算与agent完全无关的奖励"""
+        from carla_c2osr.config import get_global_config
         total_reward = 0.0
-        dt = 1.0  # 时间步长
-        
+        dt = get_global_config().time.dt
+
         # 1. 舒适性奖励（基于自车加速度和急动）
         if len(ego_trajectory) >= 3:
             for i in range(1, len(ego_trajectory) - 1):
@@ -330,7 +373,15 @@ class QValueCalculator:
                 distance = np.linalg.norm(velocity)
                 total_distance += distance
             total_reward += total_distance * self.reward_config.progress_reward_weight
-        
+
+        # 4. 中心线偏移惩罚
+        if hasattr(self, '_reference_path') and self._reference_path is not None:
+            from carla_c2osr.evaluation.rewards import calculate_distance_to_path
+            for pos in ego_trajectory:
+                offset = calculate_distance_to_path(pos, self._reference_path)
+                weight = getattr(self.reward_config, 'centerline_offset_penalty_weight', 1.0)
+                total_reward -= offset * weight
+
         return total_reward
     
     def _calculate_expected_collision_reward_directly(self,
@@ -338,19 +389,31 @@ class QValueCalculator:
                                                     agent_distributions: Dict[int, Dict[int, Tuple[List[int], np.ndarray]]],
                                                     grid: GridMapper,
                                                     current_world_state: WorldState) -> Tuple[float, float]:
-        """直接计算期望碰撞奖励和期望碰撞概率 - 使用精确车辆形状碰撞检测！
-        
+        """直接计算期望碰撞奖励和期望碰撞概率 - 使用精确车辆形状碰撞检测 + Cell剪枝优化！
+
         Returns:
             (expected_reward, expected_collision_probability)
         """
         expected_reward = 0.0
         expected_collision_prob = 0.0  # 期望碰撞概率
         collision_count = 0  # 调试：碰撞计数
-        
+
+        # 🚀 优化1: 预计算ego轨迹占据的cell集合（用于剪枝）
+        ego_cells_set = set()
+        for ego_pos in ego_trajectory:
+            ego_cell = grid.world_to_cell(ego_pos)
+            # 扩展到邻域（考虑车辆尺寸，半径2约等于1米）
+            neighbors = grid.get_neighbors(ego_cell, radius=2)
+            ego_cells_set.update(neighbors)
+
+        # 统计剪枝效果
+        total_checks = 0
+        pruned_checks = 0
+
         # 计算自车朝向序列（假设直行，实际应根据轨迹计算）
         ego_headings = []
         ego_initial_heading = current_world_state.ego.yaw_rad
-        
+
         for i in range(len(ego_trajectory)):
             if i == 0:
                 ego_headings.append(ego_initial_heading)
@@ -363,7 +426,7 @@ class QValueCalculator:
                     ego_headings.append(heading)
                 else:
                     ego_headings.append(ego_headings[-1])
-        
+
         for timestep, ego_pos in enumerate(ego_trajectory):
             timestep_key = timestep + 1  # timestep从1开始
             
@@ -384,13 +447,20 @@ class QValueCalculator:
                     for cell_idx, prob in enumerate(probabilities):
                         if prob > 0:
                             cell = reachable_cells[cell_idx]
+                            total_checks += 1
+
+                            # 🚀 优化2: Cell剪枝 - 快速跳过不可能碰撞的cells
+                            if cell not in ego_cells_set:
+                                pruned_checks += 1
+                                continue  # 不在ego附近，跳过精确检测！
+
                             cell_center = grid.index_to_xy_center(cell)
                             world_pos = grid.grid_to_world(np.array(cell_center))
-                            
+
                             # 使用精确的车辆形状碰撞检测
                             # 假设agent朝向与自车相同（简化处理）
                             agent_heading = ego_headings[timestep]
-                            
+
                             collision_occurred = self.collision_detector.check_point_collision(
                                 ego_pos=ego_pos,
                                 ego_heading=ego_headings[timestep],
@@ -399,7 +469,7 @@ class QValueCalculator:
                                 ego_type=AgentType.VEHICLE,
                                 agent_type=agent_type
                             )
-                            
+
                             if collision_occurred:
                                 # 直接累加期望值：概率 × 碰撞惩罚
                                 collision_contribution = prob * self.reward_config.collision_penalty
@@ -412,13 +482,16 @@ class QValueCalculator:
                                 # 调试：打印碰撞信息（仅前几个）
                                 if timestep < 2 and cell_idx < 3:
                                     print(f"    🚨 精确碰撞检测: t{timestep} agent{agent_id} 位置={world_pos}, 概率={prob:.3f}, 惩罚={collision_contribution:.3f}")
-        
-        # 调试：打印总结信息
-        if collision_count > 0:
-            print(f"  🚨 总精确碰撞检测: {collision_count}次, 期望惩罚={expected_reward:.3f}, 期望碰撞概率={expected_collision_prob:.3f}")
-        else:
-            print(f"  ✅ 无精确碰撞检测, 期望惩罚={expected_reward:.3f}, 期望碰撞概率={expected_collision_prob:.3f}")
-        
+
+        # 打印剪枝效果统计(仅在debug模式)
+        if total_checks > 0:
+            from carla_c2osr.config import get_global_config
+            verbose = get_global_config().visualization.verbose_level
+            if verbose >= 2:
+                prune_rate = (pruned_checks / total_checks) * 100
+                actual_checks = total_checks - pruned_checks
+                print(f"  ⚡ Cell剪枝: 总cells={total_checks}, 剪枝={pruned_checks}, 实际检测={actual_checks}, 剪枝率={prune_rate:.1f}%")
+
         return expected_reward, expected_collision_prob
     
     def _calculate_expected_safety_reward_directly(self,
@@ -461,10 +534,12 @@ class QValueCalculator:
         current_agents_states = []
         for agent in current_world_state.agents:
             current_agents_states.append((
-                agent.position_m[0], agent.position_m[1], 
-                agent.velocity_mps[0], agent.velocity_mps[1], 
+                agent.position_m[0], agent.position_m[1],
+                agent.velocity_mps[0], agent.velocity_mps[1],
                 agent.heading_rad, agent.agent_type.value
             ))
+        # 重要：必须按agent_type排序，与存储时保持一致
+        current_agents_states = sorted(current_agents_states, key=lambda x: x[5])
         
         agent_transition_samples = {}
         
@@ -481,14 +556,16 @@ class QValueCalculator:
             
             bank.init_agent(agent_id, reachable_sets)
             
+            # 从全局配置读取匹配阈值
+            config = get_global_config()
             historical_transitions_by_timestep = trajectory_buffer.get_agent_historical_transitions_strict_matching(
                 agent_id=agent_id,
                 current_ego_state=current_ego_state,
                 current_agents_states=current_agents_states,
                 ego_action_trajectory=ego_action_trajectory,
-                ego_state_threshold=5.0,
-                agents_state_threshold=5.0,
-                ego_action_threshold=5.0
+                ego_state_threshold=config.matching.ego_state_threshold,
+                agents_state_threshold=config.matching.agents_state_threshold,
+                ego_action_threshold=config.matching.ego_action_threshold
             )
             
             for timestep, historical_cells in historical_transitions_by_timestep.items():

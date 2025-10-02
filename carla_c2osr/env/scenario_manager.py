@@ -13,13 +13,14 @@ import numpy as np
 
 class ScenarioManager:
     """场景管理器"""
-    
+
     def __init__(self, grid_size_m: float = 20.0):
         """
         Args:
             grid_size_m: 网格大小
         """
         self.grid_size_m = grid_size_m
+        self._reference_path = None  # 缓存参考路径
     
     def create_scenario(self) -> WorldState:
         """创建固定的mock场景。"""
@@ -48,16 +49,72 @@ class ScenarioManager:
         return WorldState(time_s=0.0, ego=ego, agents=[agent1])  # 只有一个agent
         # return WorldState(time_s=0.0, ego=ego, agents=[])  # 没有agent
     
+    def generate_reference_path(self,
+                               mode: str = "straight",
+                               horizon: int = 10,
+                               ego_start: tuple = (0.0, 0.0)) -> List[np.ndarray]:
+        """生成参考路径（中心线）。
+
+        Args:
+            mode: 路径模式 ("straight", "curve", "s_curve")
+            horizon: 路径点数量
+            ego_start: 起始位置
+
+        Returns:
+            参考路径点列表
+        """
+        if self._reference_path is not None:
+            return self._reference_path
+
+        path = []
+        x0, y0 = ego_start
+
+        if mode == "straight":
+            # 直线路径
+            for i in range(horizon):
+                x = x0 + i * 1.0
+                y = y0
+                path.append(np.array([x, y]))
+
+        elif mode == "curve":
+            # 圆弧路径
+            radius = 10.0
+            for i in range(horizon):
+                theta = i * 0.1  # 弧度
+                x = x0 + radius * np.sin(theta)
+                y = y0 + radius * (1 - np.cos(theta))
+                path.append(np.array([x, y]))
+
+        elif mode == "s_curve":
+            # S型曲线
+            for i in range(horizon):
+                x = x0 + i * 1.0
+                y = y0 + 2.0 * np.sin(i * 0.3)
+                path.append(np.array([x, y]))
+
+        else:
+            raise ValueError(f"Unknown path mode: {mode}")
+
+        self._reference_path = path
+        return path
+
+    def get_reference_path(self) -> List[np.ndarray]:
+        """获取当前场景的参考路径"""
+        if self._reference_path is None:
+            # 如果没有生成过，使用默认直线路径
+            return self.generate_reference_path()
+        return self._reference_path
+
     def create_scenario_state(self, world: WorldState) -> ScenarioState:
         """从WorldState创建ScenarioState用于buffer索引"""
         agents_states = []
         for agent in world.agents:
             agents_states.append((
                 agent.position_m[0], agent.position_m[1],
-                agent.velocity_mps[0], agent.velocity_mps[1], 
+                agent.velocity_mps[0], agent.velocity_mps[1],
                 agent.heading_rad, agent.agent_type.value
             ))
-        
+
         return ScenarioState(
             ego_position=world.ego.position_m,
             ego_velocity=world.ego.velocity_mps,
