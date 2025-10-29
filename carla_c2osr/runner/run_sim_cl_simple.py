@@ -123,7 +123,13 @@ def run_episode(episode_id: int,
     # 7. 生成episode GIF
     gif_path = vis_manager.generate_episode_gif(frame_paths)
 
-    # 8. 存储轨迹数据到buffer
+    # 8. 记录所有轨迹的Q值数据
+    if ctx.q_tracker is not None:
+        ctx.q_tracker.add_all_trajectories_data(episode_id, trajectory_q_values)
+        # 可视化所有轨迹Q值演化（从第1个episode到当前episode）
+        vis_manager.visualize_q_evolution()
+
+    # 9. 存储轨迹数据到buffer
     data_manager.store_episode_trajectories(
         ego_trajectory, agent_trajectories, agent_trajectory_cells
     )
@@ -470,6 +476,7 @@ def main():
         components['q_tracker'].q_value_history = q_tracker_data.get('q_value_history', [])
         components['q_tracker'].percentile_q_history = q_tracker_data.get('percentile_q_history', [])
         components['q_tracker'].collision_rate_history = q_tracker_data.get('collision_rate_history', [])
+        components['q_tracker'].all_trajectories_history = q_tracker_data.get('all_trajectories_history', [])  # 新增：恢复所有轨迹Q值历史
         components['q_tracker'].q_distribution_history = [ep['q_distribution'] for ep in components['q_tracker'].episode_data]
         components['q_tracker'].detailed_info_history = [ep.get('detailed_info', {}) for ep in components['q_tracker'].episode_data]
 

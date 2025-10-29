@@ -34,9 +34,9 @@ class TimeConfig:
 class SamplingConfig:
     """采样相关配置"""
     reachable_set_samples: int = 1000     # 可达集采样数量
-    reachable_set_samples_legacy: int = 100  # 兼容旧版本的采样数量
-    q_value_samples: int = 100           # Q值计算采样数量
-    trajectory_samples: int = 100        # 轨迹生成采样数量
+    reachable_set_samples_legacy: int = 1000  # 兼容旧版本的采样数量
+    q_value_samples: int = 50           # Q值计算采样数量
+    trajectory_samples: int = 50        # 轨迹生成采样数量
 
 
 @dataclass
@@ -44,7 +44,7 @@ class GridConfig:
     """网格相关配置"""
     grid_size_m: float = 100.0           # 网格物理尺寸（米）
     grid_resolution: int = 200          # 网格分辨率（N×N）
-    cell_size_m: float = 0.5            # 网格单元尺寸（米）
+    cell_size_m: float = 0.5# 网格单元尺寸（米）
 
 
 @dataclass
@@ -70,7 +70,7 @@ class MatchingConfig:
     ego_action_resolution: float = 5.0      # 动作索引分辨率（米）
 
     # 数据增强
-    trajectory_storage_multiplier: int = 100  # 轨迹存储倍数（1=不重复,10=每次观测存储10次）
+    trajectory_storage_multiplier: int = 10  # 轨迹存储倍数（1=不重复,10=每次观测存储10次）
 
 
 @dataclass
@@ -78,7 +78,7 @@ class RewardConfig:
     """奖励函数相关配置"""
     # 碰撞相关
     collision_penalty: float = -50.0   # 碰撞惩罚
-    collision_threshold: float = 0.01    # 碰撞距离阈值
+    collision_threshold: float = 0.01    # 碰撞阈值
 
     # 碰撞检测优化
     collision_check_cell_radius: int = 6  # Cell剪枝半径（cell数,约为半径米数×2）
@@ -105,7 +105,7 @@ class RewardConfig:
     distance_penalty_weight: float = 0.0  # 距离惩罚权重
 
     # 中心线偏移参数
-    centerline_offset_penalty_weight: float = 1.0  # 中心线偏移惩罚权重
+    centerline_offset_penalty_weight: float = 2.0  # 中心线偏移惩罚权重
 
 
 @dataclass
@@ -196,8 +196,8 @@ class ScenarioConfig:
 @dataclass
 class AgentTrajectoryConfig:
     """智能体轨迹生成配置"""
-    mode: str = "straight"  # 轨迹生成模式: "dynamic" | "straight" | "stationary"
-    random_seed: int = 42  # 轨迹生成随机种子
+    mode: str = "stochastic"  # 轨迹生成模式: "stochastic" | "straight" | "stationary"
+    random_seed: int = 42  # 轨迹生成随机种子（注：stochastic模式不使用此种子以保证随机性）
 
 
 @dataclass

@@ -59,6 +59,21 @@ class VisualizationManager:
         except Exception as e:
             print(f"  警告: Lattice可视化失败: {e}")
 
+    def visualize_q_evolution(self):
+        """
+        可视化所有轨迹的Q值演化（从第1个episode到当前episode）
+        """
+        if self.ctx.q_tracker is None:
+            return
+
+        try:
+            # 生成所有轨迹Q值演化图
+            output_path = self.ctx.output_dir / f"all_trajectories_q_evolution_ep{self.ctx.episode_id:02d}.png"
+            self.ctx.q_tracker.plot_all_trajectories_q_evolution(str(output_path))
+
+        except Exception as e:
+            print(f"  警告: Q值演化可视化失败: {e}")
+
     def generate_episode_gif(self, frame_paths: List[str]) -> str:
         """
         生成episode GIF

@@ -30,7 +30,7 @@ class SimpleTrajectoryGenerator:
             horizon: 轨迹长度
             dt: 时间步长，默认从全局配置读取
             mode: 轨迹生成模式，默认从全局配置读取
-                  - "dynamic": 随机动力学模型（默认）
+                  - "stochastic": 基于意图的随机轨迹（默认）
                   - "straight": 匀速直线运动
                   - "stationary": 静止不动
 
@@ -51,13 +51,17 @@ class SimpleTrajectoryGenerator:
             return self._generate_stationary_trajectory(agent, horizon)
         elif mode == "straight":
             return self._generate_straight_trajectory(agent, horizon, dt)
-        elif mode == "dynamic":
-            return self._generate_dynamic_trajectory(agent, horizon, dt)
+        elif mode == "stochastic":
+            return self._generate_stochastic_trajectory(agent, horizon, dt)
         else:
             raise ValueError(f"Unknown trajectory mode: {mode}")
 
-    def _generate_dynamic_trajectory(self, agent: AgentState, horizon: int, dt: float) -> List[np.ndarray]:
-        """生成动态轨迹（原有的随机动力学模型）。
+    def _generate_stochastic_trajectory(self, agent: AgentState, horizon: int, dt: float) -> List[np.ndarray]:
+        """基于意图的随机轨迹生成
+
+        预定义轨迹类型及概率：
+        - 加速直行: 40%
+        - 减速直行: 60%
 
         Args:
             agent: 智能体状态
@@ -67,52 +71,110 @@ class SimpleTrajectoryGenerator:
         Returns:
             轨迹位置列表
         """
-        # 获取动力学参数
-        dynamics = AgentDynamicsParams.for_agent_type(agent.agent_type)
-        
+        # 随机选择意图
+        intention = np.random.choice(
+            ['accelerate', 'decelerate'],
+            p=[0.4, 0.6]  # 概率分布：40%加速，60%减速
+        )
+
+        if intention == 'accelerate':
+            return self._generate_accelerate_trajectory(agent, horizon, dt)
+        else:  # decelerate
+            return self._generate_decelerate_trajectory(agent, horizon, dt)
+
+    def _generate_accelerate_trajectory(self, agent: AgentState, horizon: int, dt: float) -> List[np.ndarray]:
+        """生成加速直行轨迹
+
+        Args:
+            agent: 智能体状态
+            horizon: 轨迹长度
+            dt: 时间步长
+
+        Returns:
+            轨迹位置列表
+        """
         trajectory = []
         current_pos = np.array(agent.position_m, dtype=float)
-        current_vel = np.array(agent.velocity_mps, dtype=float)
-        current_heading = agent.heading_rad
-        current_speed = math.sqrt(current_vel[0]**2 + current_vel[1]**2)
-        
-        min_bound, max_bound = self.grid_bounds
-        
+        velocity = np.array(agent.velocity_mps, dtype=float)
+        velocity_norm = np.linalg.norm(velocity)
+
+        if velocity_norm < 1e-6:
+            # 如果初始速度为0，使用默认方向
+            velocity = np.array([1.0, 0.0])
+            velocity_norm = 1.0
+
+        # 加速参数
+        accel_per_step = 0.5  # m/s 每个时间步增加的速度
+        max_speed = 8.0  # 最大速度限制 m/s
+
         for t in range(horizon):
-            if agent.agent_type == AgentType.PEDESTRIAN:
-                # 行人：随机游走，偶尔改变方向
-                if t % 4 == 0:
-                    angle_change = np.random.uniform(-np.pi/3, np.pi/3)  # ±60度
-                    current_heading += angle_change
-                
-                # 速度变化：偶尔加速或减速
-                if t % 4 == 0:
-                    speed_change = np.random.uniform(-0.2, 0.2)
-                    current_speed = np.clip(current_speed + speed_change, 0.3, dynamics.max_speed_mps)
-                
-                # 计算下一位置
-                next_x = current_pos[0] + current_speed * math.cos(current_heading) * dt
-                next_y = current_pos[1] + current_speed * math.sin(current_heading) * dt
-                
-            else:  # 车辆类型
-                # 复用车辆动力学模型逻辑
-                next_pos, next_speed, next_heading = self._vehicle_dynamics_step(
-                    current_pos, current_speed, current_heading, dynamics, dt, t
-                )
-                next_x, next_y = next_pos
-                current_speed = next_speed
-                current_heading = next_heading
-            
-            # 边界处理：如果超出边界，停止移动
-            if next_x < min_bound or next_x > max_bound or next_y < min_bound or next_y > max_bound:
-                # 保持在当前位置
-                next_x = current_pos[0]
-                next_y = current_pos[1]
-            
-            current_pos = np.array([next_x, next_y])
+            # 逐步加速：速度系数随时间线性增长
+            speed_increase = accel_per_step * t
+            current_speed = min(velocity_norm + speed_increase, max_speed)
+
+            # 计算下一位置（保持原方向）
+            next_pos = current_pos + (velocity / velocity_norm) * current_speed * dt
+
+            # 边界检查
+            if self._is_within_bounds(next_pos):
+                current_pos = next_pos
+
             trajectory.append(current_pos.copy())
 
         return trajectory
+
+    def _generate_decelerate_trajectory(self, agent: AgentState, horizon: int, dt: float) -> List[np.ndarray]:
+        """生成减速直行轨迹
+
+        Args:
+            agent: 智能体状态
+            horizon: 轨迹长度
+            dt: 时间步长
+
+        Returns:
+            轨迹位置列表
+        """
+        trajectory = []
+        current_pos = np.array(agent.position_m, dtype=float)
+        velocity = np.array(agent.velocity_mps, dtype=float)
+        velocity_norm = np.linalg.norm(velocity)
+
+        if velocity_norm < 1e-6:
+            # 如果初始速度为0，使用默认方向
+            velocity = np.array([1.0, 0.0])
+            velocity_norm = 1.0
+
+        # 减速参数
+        decel_per_step = 0.3  # m/s 每个时间步减少的速度
+        min_speed = 0.3  # 最低速度（不完全停止）
+
+        for t in range(horizon):
+            # 逐步减速：速度系数随时间线性降低
+            speed_decrease = decel_per_step * t
+            current_speed = max(velocity_norm - speed_decrease, min_speed)
+
+            # 计算下一位置（保持原方向）
+            next_pos = current_pos + (velocity / velocity_norm) * current_speed * dt
+
+            # 边界检查
+            if self._is_within_bounds(next_pos):
+                current_pos = next_pos
+
+            trajectory.append(current_pos.copy())
+
+        return trajectory
+
+    def _is_within_bounds(self, pos: np.ndarray) -> bool:
+        """检查位置是否在网格边界内
+
+        Args:
+            pos: 位置坐标
+
+        Returns:
+            是否在边界内
+        """
+        min_bound, max_bound = self.grid_bounds
+        return min_bound <= pos[0] <= max_bound and min_bound <= pos[1] <= max_bound
 
     def _generate_stationary_trajectory(self, agent: AgentState, horizon: int) -> List[np.ndarray]:
         """生成静止轨迹（agent保持在初始位置）。
@@ -162,64 +224,6 @@ class SimpleTrajectoryGenerator:
 
         return trajectory
 
-    def _vehicle_dynamics_step(self, pos: np.ndarray, speed: float, heading: float,
-                              dynamics: AgentDynamicsParams, dt: float, timestep: int) -> Tuple[np.ndarray, float, float]:
-        """车辆动力学一步积分，复用现有的自行车模型逻辑。
-        
-        Args:
-            pos: 当前位置
-            speed: 当前速度
-            heading: 当前朝向
-            dynamics: 动力学参数
-            dt: 时间步长
-            timestep: 当前时间步
-            
-        Returns:
-            (下一位置, 下一速度, 下一朝向)
-        """
-        # 添加方向扰动（每6步轻微调整）
-        if timestep % 6 == 0:
-            # 根据阿克曼约束计算最大转向角
-            if dynamics.wheelbase_m > 0:
-                # 根据轴距和最大偏航角速度计算最大转向角
-                max_steer_rad = math.atan(dynamics.max_yaw_rate_rps * dynamics.wheelbase_m / max(speed, 0.1))
-                max_steer_rad = min(max_steer_rad, math.pi / 12)  # 限制最大 15 度
-            else:
-                max_steer_rad = dynamics.max_yaw_rate_rps * dt
-            
-            # 添加轻微的随机转向扰动
-            steer_angle = np.random.uniform(-max_steer_rad * 0.3, max_steer_rad * 0.3)
-            
-            # 自行车模型计算偏航角速度
-            if dynamics.wheelbase_m > 0:
-                yaw_rate = speed * math.tan(steer_angle) / dynamics.wheelbase_m
-            else:
-                yaw_rate = steer_angle / dt
-            
-            yaw_rate = np.clip(yaw_rate, -dynamics.max_yaw_rate_rps, dynamics.max_yaw_rate_rps)
-            heading += yaw_rate * dt
-        else:
-            yaw_rate = 0.0
-        
-        # 速度调整（每6步轻微调整）
-        if timestep % 6 == 0:
-            # 偏向保持当前速度，偶尔轻微调整
-            if np.random.random() < 0.7:  # 70% 概率保持或轻微加速
-                accel = np.random.uniform(-0.5, dynamics.max_accel_mps2 * 0.2)  # 减少加速度范围
-            else:  # 30% 概率减速
-                accel = np.random.uniform(-dynamics.max_decel_mps2 * 0.2, 0)  # 减少减速度范围
-            
-            # 确保加速度不超过限制
-            accel = np.clip(accel, -dynamics.max_decel_mps2, dynamics.max_accel_mps2)
-            speed = max(0, speed + accel * dt)
-            speed = min(speed, dynamics.max_speed_mps)
-        
-        # 位置积分（使用平均航向角，提高精度）
-        avg_heading = heading - 0.5 * yaw_rate * dt  # 使用半步前的航向角
-        next_x = pos[0] + speed * math.cos(avg_heading) * dt
-        next_y = pos[1] + speed * math.sin(avg_heading) * dt
-        
-        return np.array([next_x, next_y]), speed, heading
     
     def generate_ego_trajectory(self, 
                                ego_mode: str, 

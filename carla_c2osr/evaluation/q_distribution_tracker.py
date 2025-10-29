@@ -20,6 +20,7 @@ class QDistributionTracker:
         self.q_distribution_history = []
         self.collision_rate_history = []
         self.detailed_info_history = []
+        self.all_trajectories_history = []  # 新增：存储每个episode所有候选轨迹的Q值信息
 
     def _get_percentile_q_value(self, q_values: np.ndarray, percentile: float) -> float:
         """
@@ -79,7 +80,32 @@ class QDistributionTracker:
         self.q_distribution_history.append(q_distribution.copy())
         self.collision_rate_history.append(collision_rate)
         self.detailed_info_history.append(detailed_info)
-    
+
+    def add_all_trajectories_data(self, episode_id: int, trajectory_q_values: List[Dict]):
+        """添加episode中所有候选轨迹的Q值数据
+
+        Args:
+            episode_id: Episode ID
+            trajectory_q_values: 所有候选轨迹的Q值信息列表
+        """
+        # 提取每条轨迹的关键信息
+        trajectories_info = []
+        for traj_info in trajectory_q_values:
+            trajectories_info.append({
+                'trajectory_id': traj_info['trajectory_id'],
+                'lateral_offset': traj_info['lateral_offset'],
+                'target_speed': traj_info['target_speed'],
+                'min_q': traj_info['min_q'],
+                'mean_q': traj_info['mean_q'],
+                'percentile_q': traj_info['percentile_q'],
+                'collision_rate': traj_info['collision_rate']
+            })
+
+        self.all_trajectories_history.append({
+            'episode_id': episode_id,
+            'trajectories': trajectories_info
+        })
+
     def plot_q_distribution_evolution(self, output_path: str,
                                     figsize: Tuple[int, int] = (15, 8)) -> None:
         """绘制所有Q值随episode变化的曲线图（使用Percentile Q）"""
@@ -199,7 +225,70 @@ class QDistributionTracker:
         plt.close()
         
         print(f"碰撞率变化图已保存到: {output_path}")
-    
+
+    def plot_all_trajectories_q_evolution(self, output_path: str,
+                                         figsize: Tuple[int, int] = (15, 10)) -> None:
+        """绘制所有候选轨迹的Percentile Q值随episode变化的曲线图
+
+        Args:
+            output_path: 输出文件路径
+            figsize: 图像大小
+        """
+        if len(self.all_trajectories_history) == 0:
+            print("没有所有轨迹的Q值数据可绘制")
+            return
+
+        # 获取percentile配置
+        from carla_c2osr.evaluation.q_value_calculator import QValueConfig
+        q_config = QValueConfig.from_global_config()
+        percentile = q_config.q_selection_percentile
+
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+
+        # 收集所有轨迹ID
+        all_traj_ids = set()
+        for ep_data in self.all_trajectories_history:
+            for traj in ep_data['trajectories']:
+                all_traj_ids.add(traj['trajectory_id'])
+
+        # 对轨迹ID排序
+        sorted_traj_ids = sorted(all_traj_ids)
+
+        # 为每个轨迹ID创建颜色
+        colors = plt.cm.tab20(np.linspace(0, 1, len(sorted_traj_ids)))
+
+        # 绘制每条轨迹的Q值演化曲线
+        for traj_idx, traj_id in enumerate(sorted_traj_ids):
+            episodes = []
+            percentile_qs = []
+
+            # 收集这条轨迹在每个episode的Q值
+            for ep_data in self.all_trajectories_history:
+                episode_id = ep_data['episode_id']
+                # 查找这条轨迹在当前episode的数据
+                traj_data = next((t for t in ep_data['trajectories'] if t['trajectory_id'] == traj_id), None)
+                if traj_data is not None:
+                    episodes.append(episode_id)
+                    percentile_qs.append(traj_data['percentile_q'])
+
+            # 绘制曲线
+            if len(episodes) > 0:
+                ax.plot(episodes, percentile_qs, 'o-', linewidth=2, markersize=6,
+                       color=colors[traj_idx], label=f'Traj {traj_id}', alpha=0.7)
+
+        ax.set_xlabel('Episode', fontsize=12)
+        ax.set_ylabel(f'P{int(percentile*100)} Q Value', fontsize=12)
+        ax.set_title(f'All Trajectories P{int(percentile*100)} Q-Value Evolution across Episodes',
+                    fontsize=14, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='center left', bbox_to_anchor=(1, 0.5), ncol=1, fontsize=9)
+
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close()
+
+        print(f"所有轨迹Q值演化图已保存到: {output_path}")
+
     def print_summary(self):
         """打印统计摘要"""
         if len(self.episode_data) == 0:
@@ -258,6 +347,7 @@ class QDistributionTracker:
             'q_value_history': self.q_value_history,
             'percentile_q_history': self.percentile_q_history,  # 新增：保存percentile Q历史
             'collision_rate_history': self.collision_rate_history,
+            'all_trajectories_history': self.all_trajectories_history,  # 新增：保存所有轨迹Q值历史
             'summary_stats': {
                 'total_episodes': len(self.q_value_history),
                 'percentile_used': float(percentile),  # 新增：记录使用的百分位数
@@ -296,6 +386,7 @@ class QDistributionTracker:
         tracker.q_value_history = data.get('q_value_history', [])
         tracker.percentile_q_history = data.get('percentile_q_history', [])
         tracker.collision_rate_history = data.get('collision_rate_history', [])
+        tracker.all_trajectories_history = data.get('all_trajectories_history', [])  # 新增：恢复所有轨迹Q值历史
 
         # 恢复q_distribution_history（从episode_data中提取）
         tracker.q_distribution_history = [
