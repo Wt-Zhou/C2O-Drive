@@ -68,7 +68,9 @@ class HighPerformanceTrajectoryBuffer:
 
     def __init__(self, horizon: Optional[int] = None,
                  spatial_resolution: Optional[float] = None,
-                 ego_action_resolution: Optional[float] = None):
+                 ego_action_resolution: Optional[float] = None,
+                 trajectory_storage_multiplier: Optional[int] = None,
+                 capacity: Optional[int] = None):
         # 从全局配置读取参数
         from carla_c2osr.config import get_global_config
         config = get_global_config()
@@ -79,8 +81,14 @@ class HighPerformanceTrajectoryBuffer:
             spatial_resolution = config.matching.spatial_resolution
         if ego_action_resolution is None:
             ego_action_resolution = config.matching.ego_action_resolution
+        if trajectory_storage_multiplier is None:
+            trajectory_storage_multiplier = config.matching.trajectory_storage_multiplier
+        if capacity is None:
+            capacity = 10000  # Default capacity
 
         self.horizon = horizon
+        self.storage_multiplier = trajectory_storage_multiplier
+        self.capacity = capacity
 
         # 主存储：agent_id -> List[AgentEpisodeData]
         self._agent_episodes: Dict[int, List[AgentEpisodeData]] = {}
@@ -97,12 +105,19 @@ class HighPerformanceTrajectoryBuffer:
         # 索引参数
         self.spatial_resolution = spatial_resolution
         self.ego_action_resolution = ego_action_resolution
-        
+
         # 全局episode计数器
         self._episode_counter = 0
-        
+
         # episode_id到AgentEpisodeData的映射（用于快速查找）
         self._episode_lookup: Dict[int, AgentEpisodeData] = {}
+
+        # FIFO队列：记录episode添加顺序
+        self._episode_fifo_queue: List[int] = []
+
+    def __len__(self) -> int:
+        """Return the number of episodes in the buffer"""
+        return len(self._episode_fifo_queue)
 
     def _get_spatial_key(self, position: Tuple[float, float]) -> Tuple[int, int]:
         """将位置映射到空间网格key"""
@@ -132,11 +147,15 @@ class HighPerformanceTrajectoryBuffer:
                            agent_trajectory_cells: List[int],
                            episode_id: Optional[int] = None) -> None:
         """存储agent episode数据并更新所有索引"""
-        
+
+        # Check capacity and remove oldest episode if needed
+        if len(self._episode_fifo_queue) >= self.capacity:
+            self._remove_oldest_episode()
+
         if episode_id is None:
             episode_id = self._episode_counter
             self._episode_counter += 1
-        
+
         # 创建episode数据
         mdp_state_action = MDPStateAction(
             ego_position=initial_ego_state[:2],
@@ -145,7 +164,7 @@ class HighPerformanceTrajectoryBuffer:
             agents_states=sorted(initial_agents_states, key=lambda x: x[5]),  # 按类型排序保证一致性
             ego_action_trajectory=ego_action_trajectory
         )
-        
+
         episode_data = AgentEpisodeData(
             episode_id=episode_id,
             agent_id=agent_id,
@@ -155,17 +174,66 @@ class HighPerformanceTrajectoryBuffer:
             agent_count_hash=len(initial_agents_states),
             ego_spatial_hash=hash(self._get_spatial_key(initial_ego_state[:2]))
         )
-        
+
         # 存储到主数据结构
         if agent_id not in self._agent_episodes:
             self._agent_episodes[agent_id] = []
         self._agent_episodes[agent_id].append(episode_data)
-        
+
         # 存储到episode查找表
         self._episode_lookup[episode_id] = episode_data
-        
+
+        # Add to FIFO queue
+        self._episode_fifo_queue.append(episode_id)
+
         # 更新所有索引
         self._update_indices(episode_data)
+
+    def _remove_oldest_episode(self):
+        """Remove the oldest episode (FIFO eviction)"""
+        if not self._episode_fifo_queue:
+            return
+
+        # Get oldest episode_id
+        oldest_episode_id = self._episode_fifo_queue.pop(0)
+
+        # Get episode data
+        if oldest_episode_id not in self._episode_lookup:
+            return
+
+        episode_data = self._episode_lookup[oldest_episode_id]
+
+        # Remove from main storage
+        agent_id = episode_data.agent_id
+        if agent_id in self._agent_episodes:
+            self._agent_episodes[agent_id] = [
+                ep for ep in self._agent_episodes[agent_id]
+                if ep.episode_id != oldest_episode_id
+            ]
+            if not self._agent_episodes[agent_id]:
+                del self._agent_episodes[agent_id]
+
+        # Remove from episode lookup
+        del self._episode_lookup[oldest_episode_id]
+
+        # Remove from indices
+        agent_count = episode_data.agent_count_hash
+        if agent_count in self._agent_count_index:
+            self._agent_count_index[agent_count].discard(oldest_episode_id)
+            if not self._agent_count_index[agent_count]:
+                del self._agent_count_index[agent_count]
+
+        spatial_key = self._get_spatial_key(episode_data.initial_mdp.ego_position)
+        if spatial_key in self._ego_spatial_index:
+            self._ego_spatial_index[spatial_key].discard(oldest_episode_id)
+            if not self._ego_spatial_index[spatial_key]:
+                del self._ego_spatial_index[spatial_key]
+
+        action_sig = self._get_action_signature(episode_data.initial_mdp.ego_action_trajectory)
+        if action_sig in self._ego_action_index:
+            self._ego_action_index[action_sig].discard(oldest_episode_id)
+            if not self._ego_action_index[action_sig]:
+                del self._ego_action_index[action_sig]
 
     def _update_indices(self, episode_data: AgentEpisodeData):
         """更新所有索引结构"""
@@ -212,6 +280,8 @@ class HighPerformanceTrajectoryBuffer:
         if agent_id not in self._agent_episodes:
             if debug:
                 print(f"  [Debug] Agent {agent_id} 没有历史数据")
+                print(f"  [Debug] 可用的 agent IDs: {sorted(self._agent_episodes.keys())}")
+                print(f"  [Debug] Buffer中总episodes数: {len(self._episode_lookup)}")
             return results
 
         # 第一步：多级索引快速过滤候选episodes
@@ -227,7 +297,7 @@ class HighPerformanceTrajectoryBuffer:
         
         # 第二步：对候选episodes进行严格匹配
         total_matched_timesteps = 0
-        for episode_data in candidate_episodes:
+        for idx, episode_data in enumerate(candidate_episodes):
             # 严格匹配MDP状态-动作
             matched_timesteps = self._strict_match_mdp(
                 episode_data,
@@ -236,7 +306,8 @@ class HighPerformanceTrajectoryBuffer:
                 ego_action_trajectory,
                 ego_state_threshold,
                 agents_state_threshold,
-                ego_action_threshold
+                ego_action_threshold,
+                debug=(debug and idx < 3)  # Only debug first 3 candidates
             )
 
             # 将匹配成功的时间步数据加入结果
@@ -291,27 +362,41 @@ class HighPerformanceTrajectoryBuffer:
         
         return candidates
 
-    def _strict_match_mdp(self, episode_data, current_ego_state, current_agents, 
-                         ego_action, ego_thresh, agents_thresh, action_thresh):
+    def _strict_match_mdp(self, episode_data, current_ego_state, current_agents,
+                         ego_action, ego_thresh, agents_thresh, action_thresh, debug=False):
         """严格的MDP状态-动作匹配，返回匹配成功的时间步列表"""
-        
+
         matched_timesteps = []
         historical_mdp = episode_data.initial_mdp
-        
+
         # 1. 自车初始状态匹配
-        ego_pos_diff = np.linalg.norm(np.array(current_ego_state[:2]) - 
+        ego_pos_diff = np.linalg.norm(np.array(current_ego_state[:2]) -
                                      np.array(historical_mdp.ego_position))
-        
+
+        if debug:
+            print(f"    [MDP Match] Episode {episode_data.episode_id}:")
+            print(f"      Ego pos: current={current_ego_state[:2]}, historical={historical_mdp.ego_position}, diff={ego_pos_diff:.3f}m, thresh={ego_thresh}m")
+
         if ego_pos_diff > ego_thresh:
+            if debug:
+                print(f"      ❌ Ego position check FAILED")
             return matched_timesteps
-        
+
         # 2. 环境agents状态严格匹配（相同数量 + 位置匹配）
         if len(current_agents) != len(historical_mdp.agents_states):
+            if debug:
+                print(f"      ❌ Agent count mismatch: {len(current_agents)} vs {len(historical_mdp.agents_states)}")
             return matched_timesteps
-        
-        if not self._match_all_agents(current_agents, historical_mdp.agents_states, agents_thresh):
+
+        agents_match = self._match_all_agents(current_agents, historical_mdp.agents_states, agents_thresh, debug=debug)
+        if not agents_match:
+            if debug:
+                print(f"      ❌ Agents state matching FAILED (threshold={agents_thresh}m)")
             return matched_timesteps
-        
+
+        if debug:
+            print(f"      ✓ Ego & agents state matched! Now checking action trajectory...")
+
         # 3. 逐时间步自车动作匹配
         for t in range(min(len(ego_action), len(historical_mdp.ego_action_trajectory))):
             action_diff = np.linalg.norm(
@@ -321,43 +406,58 @@ class HighPerformanceTrajectoryBuffer:
 
             if action_diff <= action_thresh:
                 matched_timesteps.append(t + 1)  # timestep从1开始,与reachable_sets对齐
-        
+
+        if debug:
+            print(f"      Action matching: {len(matched_timesteps)}/{min(len(ego_action), len(historical_mdp.ego_action_trajectory))} timesteps matched (thresh={action_thresh}m)")
+
         return matched_timesteps
 
-    def _match_all_agents(self, current_agents, historical_agents, threshold):
+    def _match_all_agents(self, current_agents, historical_agents, threshold, debug=False):
         """严格的环境agents匹配 - 使用匈牙利算法保证全局最优"""
         if len(current_agents) != len(historical_agents):
             return False
-        
+
         # 构建距离矩阵
         n = len(current_agents)
         if n == 0:
             return True
-            
+
         distance_matrix = np.zeros((n, n))
-        
+
+        if debug:
+            print(f"        Agents matching: {n} current agents vs {n} historical agents")
+
         for i, curr_agent in enumerate(current_agents):
             for j, hist_agent in enumerate(historical_agents):
                 # 检查agent类型是否匹配
                 if curr_agent[5] != hist_agent[5]:  # agent_type不匹配
                     distance_matrix[i][j] = float('inf')
+                    if debug and i == 0 and j == 0:
+                        print(f"        Type mismatch: current[0]={curr_agent[5]} vs historical[0]={hist_agent[5]}")
                     continue
-                    
+
                 # 计算位置距离
                 pos_diff = np.linalg.norm(np.array(curr_agent[:2]) - np.array(hist_agent[:2]))
                 vel_diff = np.linalg.norm(np.array(curr_agent[2:4]) - np.array(hist_agent[2:4]))
-                
+
                 distance_matrix[i][j] = pos_diff + vel_diff
-        
+
+                if debug and i == 0 and j == 0:
+                    print(f"        Agent[0]: current_pos={curr_agent[:2]}, hist_pos={hist_agent[:2]}, pos_diff={pos_diff:.3f}m")
+                    print(f"        Agent[0]: current_vel={curr_agent[2:4]}, hist_vel={hist_agent[2:4]}, vel_diff={vel_diff:.3f}m/s")
+                    print(f"        Agent[0]: total_distance={distance_matrix[i][j]:.3f}, threshold={threshold}")
+
         # 使用匈牙利算法找最优匹配
         try:
             row_indices, col_indices = linear_sum_assignment(distance_matrix)
-            
+
             # 检查所有匹配是否都在阈值内
             for i, j in zip(row_indices, col_indices):
                 if distance_matrix[i][j] > threshold:
+                    if debug:
+                        print(f"        Distance {distance_matrix[i][j]:.3f}m > threshold {threshold}m for match ({i},{j})")
                     return False
-            
+
             return True
         except:
             # 如果匈牙利算法失败，使用简单的贪心匹配
@@ -448,32 +548,33 @@ class HighPerformanceTrajectoryBuffer:
                                              timestep_scenarios: List[Tuple[ScenarioState, List[AgentTrajectoryData]]],
                                              ego_trajectory: List[Tuple[float, float]] = None) -> None:
         """向后兼容的按时间步存储接口（支持数据增强倍数）"""
-        # 从全局配置读取存储倍数
-        from carla_c2osr.config import get_global_config
-        config = get_global_config()
-        storage_multiplier = config.matching.trajectory_storage_multiplier
+        # 使用初始化时设置的存储倍数（支持显式传参或从全局配置读取）
+        storage_multiplier = self.storage_multiplier
 
         for timestep, (scenario_state, trajectories_data) in enumerate(timestep_scenarios):
             # 为每个agent存储轨迹数据，使用timestep作为episode_id的一部分
             for traj_data in trajectories_data:
                 # 创建与查询时一致的自车动作轨迹
+                # CRITICAL FIX: 使用完整的horizon步ego轨迹（不受trajectory_cells长度限制）
+                # 这确保后期timestep存储的数据也能匹配到所有时间步
                 if ego_trajectory is not None:
-                    # 使用传入的自车轨迹，从当前时间步开始的未来轨迹
+                    # 使用传入的自车轨迹，始终创建完整horizon长度的ego_action
+                    # Episode末尾用最后位置填充，确保与查询格式匹配
                     ego_action = []
-                    for action_t in range(timestep, min(timestep + len(traj_data.trajectory_cells), len(ego_trajectory))):
-                        ego_action.append(tuple(ego_trajectory[action_t]))
+                    for action_t in range(self.horizon):
+                        # 获取对应位置，如果超出范围则使用最后一个已知位置
+                        traj_idx = min(timestep + action_t, len(ego_trajectory) - 1)
+                        ego_action.append(tuple(ego_trajectory[traj_idx]))
                 else:
-                    # 回退到简化的当前位置
-                    ego_action = [scenario_state.ego_position] * len(traj_data.trajectory_cells)
+                    # 回退到简化的当前位置（也使用horizon步）
+                    ego_action = [scenario_state.ego_position] * self.horizon
 
                 # 创建initial ego state
                 initial_ego_state = (scenario_state.ego_position[0], scenario_state.ego_position[1], scenario_state.ego_heading)
 
                 # 根据存储倍数，重复存储多次
                 for rep_idx in range(storage_multiplier):
-                    # 使用episode_id + timestep + rep_idx创建唯一标识
-                    unique_episode_id = f"{episode_id}_t{timestep}_r{rep_idx}"
-
+                    # 不传episode_id，使用自增计数器避免hash冲突
                     self.store_agent_episode(
                         agent_id=traj_data.agent_id,
                         agent_type=traj_data.agent_type,
@@ -481,8 +582,28 @@ class HighPerformanceTrajectoryBuffer:
                         initial_agents_states=scenario_state.agents_states,
                         ego_action_trajectory=ego_action,
                         agent_trajectory_cells=traj_data.trajectory_cells,
-                        episode_id=hash(unique_episode_id)  # 转换为整数ID
+                        # episode_id使用自增计数器，避免hash冲突
                     )
+
+    def _pad_trajectory_cells(self, cells: List[int], horizon: int) -> List[int]:
+        """将agent轨迹cells填充到完整horizon长度
+
+        Args:
+            cells: 原始轨迹cells
+            horizon: 目标长度
+
+        Returns:
+            填充后的cells（长度=horizon）
+        """
+        if not cells:
+            return [0] * horizon
+
+        if len(cells) >= horizon:
+            return cells[:horizon]
+
+        # 用最后一个cell填充（与ego_action策略一致）
+        last_cell = cells[-1]
+        return cells + [last_cell] * (horizon - len(cells))
 
     def clear(self) -> None:
         """清空buffer"""
@@ -499,13 +620,19 @@ class HighPerformanceTrajectoryBuffer:
         total_agents = len(self._agent_episodes)
         total_agent_episodes = sum(len(episodes) for episodes in self._agent_episodes.values())
 
+        # Per-agent statistics
+        per_agent_counts = {agent_id: len(episodes) for agent_id, episodes in self._agent_episodes.items()}
+
         return {
             'total_episodes': total_episodes,
             'total_agents': total_agents,
             'total_agent_episodes': total_agent_episodes,
             'agent_count_index_size': len(self._agent_count_index),
             'spatial_index_size': len(self._ego_spatial_index),
-            'action_index_size': len(self._ego_action_index)
+            'action_index_size': len(self._ego_action_index),
+            'per_agent_counts': per_agent_counts,
+            'capacity': self.capacity,
+            'storage_multiplier': self.storage_multiplier,
         }
 
     def to_dict(self) -> Dict:

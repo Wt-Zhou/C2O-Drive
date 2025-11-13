@@ -13,7 +13,7 @@ import os
 class TimeConfig:
     """时间相关配置"""
     dt: float = 1                     # 时间步长（秒）
-    default_horizon: int = 5             # 默认预测时间步数
+    default_horizon: int = 10            # 默认预测时间步数（统一为10）
     simulation_fps: int = 10             # 仿真帧率
     
     @property
@@ -44,7 +44,13 @@ class GridConfig:
     """网格相关配置"""
     grid_size_m: float = 100.0           # 网格物理尺寸（米）
     grid_resolution: int = 200          # 网格分辨率（N×N）
-    cell_size_m: float = 0.5# 网格单元尺寸（米）
+    cell_size_m: float = 0.5            # 网格单元尺寸（米）
+
+    # 网格边界（基于grid_size_m计算，可显式覆盖）
+    x_min: float = -50.0                # X轴最小值
+    x_max: float = 50.0                 # X轴最大值
+    y_min: float = -50.0                # Y轴最小值
+    y_max: float = 50.0                 # Y轴最大值
 
 
 @dataclass
@@ -70,7 +76,7 @@ class MatchingConfig:
     ego_action_resolution: float = 5.0      # 动作索引分辨率（米）
 
     # 数据增强
-    trajectory_storage_multiplier: int = 10  # 轨迹存储倍数（1=不重复,10=每次观测存储10次）
+    trajectory_storage_multiplier: int = 1  # 轨迹存储倍数（1=不重复,10=每次观测存储10次）
 
 
 @dataclass
@@ -105,7 +111,7 @@ class RewardConfig:
     distance_penalty_weight: float = 0.0  # 距离惩罚权重
 
     # 中心线偏移参数
-    centerline_offset_penalty_weight: float = 2.0  # 中心线偏移惩罚权重
+    centerline_offset_penalty_weight: float = 0 # 中心线偏移惩罚权重
 
 
 @dataclass
@@ -180,9 +186,9 @@ class LatticeConfig:
 
     def __post_init__(self):
         if self.lateral_offsets is None:
-            self.lateral_offsets = [-4,-3,-2,-0,2,3,4]
+            self.lateral_offsets = [-3.0, -2.0, 0.0, 2.0, 3.0]  # 统一为与algorithm config一致
         if self.speed_variations is None:
-            self.speed_variations = [3,4,5]
+            self.speed_variations = [4.0]  # 统一为与algorithm config一致
 
 
 @dataclass
@@ -191,6 +197,46 @@ class ScenarioConfig:
     town: str = "Town03"
     weather: str = "ClearNoon"
     seed: int = 42
+
+
+@dataclass
+class CarlaConfig:
+    """CARLA仿真环境配置"""
+    # 连接配置
+    host: str = "localhost"
+    port: int = 2000
+    timeout: float = 10.0
+
+    # 地图和天气
+    town: str = "Town03"
+    weather: str = "ClearNoon"
+
+    # 仿真配置
+    dt: float = 0.1
+    no_rendering: bool = False
+    synchronous_mode: bool = True
+
+    # 场景配置
+    num_vehicles: int = 10
+    num_pedestrians: int = 5
+    autopilot: bool = False
+
+    # 传感器配置
+    enable_collision_sensor: bool = True
+    enable_rgb_camera: bool = False
+    enable_lidar: bool = False
+
+    # 相机视角配置
+    camera_height: float = 60.0
+    camera_pitch: float = -90.0  # -90度为俯视
+    camera_follow_ego: bool = True
+
+    # Episode配置
+    max_episode_steps: int = 500
+
+    # 交通管理器配置
+    tm_port: int = 8000
+    tm_seed: int = 0
 
 
 @dataclass
@@ -215,6 +261,7 @@ class GlobalConfig:
     lattice: LatticeConfig = None
     scenario: ScenarioConfig = None
     agent_trajectory: AgentTrajectoryConfig = None
+    carla: CarlaConfig = None  # CARLA仿真环境配置
 
     # 系统配置
     random_seed: int = 2025
@@ -246,6 +293,8 @@ class GlobalConfig:
             self.scenario = ScenarioConfig()
         if self.agent_trajectory is None:
             self.agent_trajectory = AgentTrajectoryConfig()
+        if self.carla is None:
+            self.carla = CarlaConfig()
     
     def update_dt(self, new_dt: float):
         """更新时间步长并保持其他参数一致性"""

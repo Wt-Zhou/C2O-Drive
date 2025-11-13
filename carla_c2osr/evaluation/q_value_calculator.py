@@ -28,6 +28,7 @@ class QValueConfig:
     dirichlet_alpha_out: Optional[float] = None  # 可达集外的先验强度
     learning_rate: Optional[float] = None  # 历史数据更新学习率
     q_selection_percentile: Optional[float] = None  # Q值选择百分位数（从全局配置读取）
+    gamma: Optional[float] = None  # 折扣因子
 
     def __post_init__(self):
         """从全局配置读取未设置的参数"""
@@ -44,6 +45,8 @@ class QValueConfig:
             self.learning_rate = global_config.dirichlet.learning_rate
         if self.q_selection_percentile is None:
             self.q_selection_percentile = global_config.c2osr.q_selection_percentile
+        if self.gamma is None:
+            self.gamma = global_config.c2osr.gamma
 
     @classmethod
     def from_global_config(cls):
@@ -71,7 +74,6 @@ class RewardCalculator:
             dt: 时间步长，默认从全局配置读取
         """
         if dt is None:
-            from carla_c2osr.config import get_global_config
             dt = get_global_config().time.dt
 
         if len(ego_trajectory) < 3:
@@ -108,7 +110,6 @@ class RewardCalculator:
             dt: 时间步长，默认从全局配置读取
         """
         if dt is None:
-            from carla_c2osr.config import get_global_config
             dt = get_global_config().time.dt
 
         if len(ego_trajectory) < 2:
@@ -205,13 +206,16 @@ class QValueCalculator:
         self.config = config
         self.reward_config = reward_config
         self.collision_detector = ShapeBasedCollisionDetector()
-        
-        # 创建Dirichlet参数
+
+        # 创建Dirichlet参数（从全局配置读取）
+        from carla_c2osr.config import get_global_config
+        global_config = get_global_config()
+
         self.dirichlet_params = DirichletParams(
             alpha_in=config.dirichlet_alpha_in,
             alpha_out=config.dirichlet_alpha_out,
-            delta=0.05,  # 95% 置信度
-            cK=1.0
+            delta=global_config.dirichlet.delta,
+            cK=global_config.dirichlet.cK
         )
     
     def compute_q_value(self,
@@ -242,24 +246,28 @@ class QValueCalculator:
             rng = np.random.default_rng()
         
         horizon = len(ego_action_trajectory)
-        
-        # 使用终极优化版本的Bank
-        if bank is None or not isinstance(bank, OptimizedMultiTimestepSpatialDirichletBank):
-            # 创建优化版本的Bank
-            optimized_bank = OptimizedMultiTimestepSpatialDirichletBank(
-                grid.spec.num_cells, 
-                self.dirichlet_params, 
-                horizon=horizon
+
+        # CRITICAL FIX: Bank must be provided and persistent
+        # Do NOT create temporary banks as they discard alpha updates
+        if bank is None:
+            raise ValueError(
+                "Dirichlet bank must be provided. "
+                "Cannot create temporary bank as it would discard all learned alpha values."
             )
-        else:
-            optimized_bank = bank
+
+        if not isinstance(bank, OptimizedMultiTimestepSpatialDirichletBank):
+            raise TypeError(
+                f"Expected OptimizedMultiTimestepSpatialDirichletBank, got {type(bank).__name__}. "
+                "Ensure planner passes the persistent bank instance."
+            )
+
+        optimized_bank = bank
         
         # 获取verbose级别
-        from carla_c2osr.config import get_global_config
         verbose = get_global_config().visualization.verbose_level
 
-        if verbose >= 2:
-            print(f"  🚀 === 终极优化Q值计算开始 ===")
+        if verbose >= 3:  # Only show in trace mode
+            print(f"  [Q-Value] Starting optimized calculation")
 
         # 第1步:计算与agent完全无关的奖励(只计算一次!)
         agent_independent_reward = self._calculate_agent_independent_rewards(ego_action_trajectory)
@@ -293,10 +301,6 @@ class QValueCalculator:
             final_q_value = agent_independent_reward + total_agent_dependent_reward
             q_values.append(final_q_value)
             collision_probabilities.append(expected_collision_prob)
-            
-            # if sample_idx < 3:  # 只打印前几个样本
-            #     print(f"    样本{sample_idx+1}: 碰撞={expected_collision_reward:.3f}, "
-            #           f"安全={expected_safety_reward:.3f}, 总Q={final_q_value:.3f}")
 
         # 计算percentile对应的碰撞率（与percentile Q对应）
         if len(q_values) > 0 and len(collision_probabilities) > 0:
@@ -337,22 +341,19 @@ class QValueCalculator:
             'agent_info': {}
         }
 
-        if verbose >= 2:
-            print(f"  🎉 === Q值计算完成 ===")
-            print(f"  方法: {detailed_info['calculation_method']}")
-            print(f"  基础奖励: {agent_independent_reward:.3f} (固定)")
-            print(f"  可变奖励范围: [{np.min(detailed_info['agent_dependent_rewards']):.3f}, "
-                  f"{np.max(detailed_info['agent_dependent_rewards']):.3f}]")
-            print(f"  最终Q值: 均值={np.mean(q_values):.3f}, 标准差={np.std(q_values):.3f}")
-            print(f"  碰撞概率: P{int(self.config.q_selection_percentile*100)}={percentile_collision_rate:.3f}, "
-                  f"Mean={mean_collision_probability:.3f}")
-            print(f"  计算优化: {detailed_info['computational_savings']}")
+        if verbose >= 3:  # Only show detailed stats in trace mode
+            # Enhanced Q distribution statistics
+            q_arr = np.array(q_values)
+            p5 = np.percentile(q_arr, 5)
+            p50 = np.percentile(q_arr, 50)
+            p95 = np.percentile(q_arr, 95)
+            print(f"  [Q-Value] Distribution: P5={p5:.3f}, P50={p50:.3f}, P95={p95:.3f}, "
+                  f"Mean={np.mean(q_arr):.3f}, Std={np.std(q_arr):.3f}")
         
         return q_values, detailed_info
     
     def _calculate_agent_independent_rewards(self, ego_trajectory: List[Tuple[float, float]]) -> float:
         """计算与agent完全无关的奖励"""
-        from carla_c2osr.config import get_global_config
         total_reward = 0.0
         dt = get_global_config().time.dt
 
@@ -498,21 +499,16 @@ class QValueCalculator:
                                 # 累加期望碰撞概率：概率 × 1（碰撞发生）
                                 expected_collision_prob += prob
                                 collision_count += 1
-                                
-                                # 调试：打印碰撞信息（仅前几个）
-                                if timestep < 2 and cell_idx < 3:
-                                    print(f"    🚨 精确碰撞检测: t{timestep} agent{agent_id} 位置={world_pos}, 概率={prob:.3f}, 惩罚={collision_contribution:.3f}")
 
         # 打印剪枝效果统计(仅在debug模式)
         if total_checks > 0:
-            from carla_c2osr.config import get_global_config
             verbose = get_global_config().visualization.verbose_level
-            if verbose >= 2:
+            if verbose >= 3:  # Only show in trace mode (verbose=3)
                 prune_rate = (pruned_checks / total_checks) * 100
                 actual_checks = total_checks - pruned_checks
-                radius_m = self.reward_config.collision_check_cell_radius * 0.5  # cell_size = 0.5m
-                print(f"  ⚡ Cell剪枝 (半径={self.reward_config.collision_check_cell_radius}cells≈{radius_m:.1f}m): "
-                      f"总cells={total_checks}, 剪枝={pruned_checks}, 实际检测={actual_checks}, 剪枝率={prune_rate:.1f}%")
+                radius_m = self.reward_config.collision_check_cell_radius * self.grid_spec.cell_m
+                print(f"  [Collision] Cell pruning: total={total_checks}, pruned={pruned_checks}, "
+                      f"actual={actual_checks}, rate={prune_rate:.1f}%")
 
         return expected_reward, expected_collision_prob
     
@@ -570,13 +566,19 @@ class QValueCalculator:
             
             config = get_global_config()
             reachable_sets = grid.multi_timestep_successor_cells(
-                agent, horizon=horizon, dt=config.time.dt, 
+                agent, horizon=horizon, dt=config.time.dt,
                 n_samples=config.sampling.reachable_set_samples
             )
             if not reachable_sets:
                 continue
-            
-            bank.init_agent(agent_id, reachable_sets)
+
+            # CRITICAL FIX: Only initialize if agent doesn't exist in bank
+            # This preserves accumulated alpha values across Q-value calculations
+            if agent_id not in bank.agent_alphas:
+                bank.init_agent(agent_id, reachable_sets)
+                if config.visualization.verbose_level >= 2:
+                    print(f"  [Bank Init] Agent {agent_id} initialized with {len(reachable_sets)} timesteps")
+            # If agent already exists, keep existing alpha values (don't reset!)
             
             # 从全局配置读取匹配阈值
             config = get_global_config()
@@ -587,22 +589,43 @@ class QValueCalculator:
                 ego_action_trajectory=ego_action_trajectory,
                 ego_state_threshold=config.matching.ego_state_threshold,
                 agents_state_threshold=config.matching.agents_state_threshold,
-                ego_action_threshold=config.matching.ego_action_threshold
+                ego_action_threshold=config.matching.ego_action_threshold,
+                debug=(config.visualization.verbose_level >= 2)  # Enable debug logging when verbose
             )
-            
+
+            # Log matching statistics
+            total_matched = sum(len(cells) for cells in historical_transitions_by_timestep.values())
+            matched_timesteps = len(historical_transitions_by_timestep)
+
+            # Update Dirichlet bank with matched historical data
+            update_count = 0
             for timestep, historical_cells in historical_transitions_by_timestep.items():
                 if len(historical_cells) > 0 and timestep in reachable_sets:
                     bank.update_with_softcount(
-                        agent_id, timestep, historical_cells, 
+                        agent_id, timestep, historical_cells,
                         lr=self.config.learning_rate
                     )
+                    update_count += 1
+
+            # Log update statistics with matching density (only if verbose)
+            if get_global_config().visualization.verbose_level >= 1:
+                buffer_size = len(trajectory_buffer)
+                # Calculate matching density
+                total_reachable = sum(len(cells) for cells in reachable_sets.values())
+                match_density = (total_matched / total_reachable * 100) if total_reachable > 0 else 0.0
+                print(f"  [Agent {agent_id}] Matched {total_matched}/{total_reachable} cells ({match_density:.1f}%) "
+                      f"across {matched_timesteps} timesteps, Updated {update_count} timesteps, Buffer size: {buffer_size}")
             
             transition_distributions = bank.sample_transition_distributions(
                 agent_id, n_samples=self.config.n_samples
             )
+
+            # CRITICAL FIX: Use bank's stored reachable_sets to match distribution dimensions
+            # distributions are sampled from bank.agent_alphas (using bank's dimensions)
+            # so reachable_sets must also come from bank to ensure dimension consistency
             agent_transition_samples[agent_id] = {
                 'distributions': transition_distributions,
-                'reachable_sets': reachable_sets
+                'reachable_sets': bank.agent_reachable_sets[agent_id]  # Use bank's stored sets
             }
         
         return agent_transition_samples

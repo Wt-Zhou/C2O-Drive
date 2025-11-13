@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 import numpy as np
 import math
 
@@ -223,17 +223,23 @@ class MultiTimestepSpatialDirichletBank:
     支持多时间步转移概率建模。
     """
 
-    def __init__(self, K: int, params: DirichletParams, horizon: int = 3) -> None:
+    def __init__(self, K: int, params: DirichletParams, horizon: Optional[int] = None) -> None:
         """初始化多时间步空间Dirichlet银行。
-        
+
         Args:
             K: 网格单元总数
             params: Dirichlet参数配置
-            horizon: 预测时间步数
+            horizon: 预测时间步数（None = 从全局配置读取）
         """
         assert K > 0, "Grid size K must be positive"
+
+        # Load horizon from global config if not specified
+        if horizon is None:
+            from carla_c2osr.config import get_global_config
+            horizon = get_global_config().time.default_horizon
+
         assert horizon > 0, "Horizon must be positive"
-        
+
         self.K = K
         self.params = params
         self.horizon = horizon
@@ -340,14 +346,19 @@ class OptimizedMultiTimestepSpatialDirichletBank:
     3. 支持高效的期望计算，完全消除采样
     """
 
-    def __init__(self, K: int, params: DirichletParams, horizon: int = 8) -> None:
+    def __init__(self, K: int, params: DirichletParams, horizon: Optional[int] = None) -> None:
         """初始化优化的多时间步空间Dirichlet银行。
-        
+
         Args:
             K: 网格单元总数（用于兼容性，实际维度会动态调整）
             params: Dirichlet参数配置
-            horizon: 时间范围
+            horizon: 时间范围（None = 从全局配置读取）
         """
+        # Load horizon from global config if not specified
+        if horizon is None:
+            from carla_c2osr.config import get_global_config
+            horizon = get_global_config().time.default_horizon
+
         self.K = K
         self.params = params
         self.horizon = horizon
@@ -405,9 +416,25 @@ class OptimizedMultiTimestepSpatialDirichletBank:
             if cell in reachable_cells:
                 idx = reachable_cells.index(cell)  # 找到在可达集中的索引
                 soft_count[idx] += lr
-        
+
+        # 记录更新前的alpha统计
+        alpha_before = alpha.sum()
+
         # 更新alpha参数
         self.agent_alphas[agent_id][timestep] += soft_count
+
+        # 诊断日志：监控alpha增长
+        alpha_after = self.agent_alphas[agent_id][timestep].sum()
+        updated_cells = np.count_nonzero(soft_count)
+        max_alpha = self.agent_alphas[agent_id][timestep].max()
+        mean_alpha = self.agent_alphas[agent_id][timestep].mean()
+
+        from carla_c2osr.config import get_global_config
+        if get_global_config().visualization.verbose_level >= 2:
+            print(f"    [Dirichlet Update] Agent {agent_id}, t={timestep}:")
+            print(f"      Alpha: {alpha_before:.2f} → {alpha_after:.2f} (+{alpha_after-alpha_before:.2f})")
+            print(f"      Updated cells: {updated_cells}/{len(reachable_cells)} "
+                  f"(max_α={max_alpha:.2f}, mean_α={mean_alpha:.4f})")
 
     def sample_transition_distributions(self, agent_id: int, n_samples: int = 20) -> Dict[int, List[np.ndarray]]:
         """采样多个transition分布组合（向量化批量采样版本）。

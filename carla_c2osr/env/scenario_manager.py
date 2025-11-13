@@ -30,7 +30,7 @@ class ScenarioManager:
         # 修改智能体位置，让它们更接近自车轨迹，增加碰撞可能性
         agent1 = AgentState(
             agent_id="vehicle-1",
-            position_m=(8.0, 5.0),  # 更接近自车
+            position_m=(4.0, 3.0),  # 更接近自车
             velocity_mps=(2.0, 0.0),
             heading_rad=0,
             agent_type=AgentType.VEHICLE

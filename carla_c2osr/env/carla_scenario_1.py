@@ -11,17 +11,71 @@ import sys
 import math
 from typing import List, Tuple, Optional, Dict
 
-# CARLA路径设置
-try:
-    sys.path.append(glob.glob('../carla/dist/carla-*%d.%d-%s.egg' % (
-        sys.version_info.major,
-        sys.version_info.minor,
-        'win-amd64' if os.name == 'nt' else 'linux-x86_64'))[0])
-except IndexError:
-    pass
+# CARLA路径设置 - 智能查找
+def _find_and_add_carla_egg():
+    """智能查找并添加CARLA .egg文件到sys.path"""
+    platform_str = 'win-amd64' if os.name == 'nt' else 'linux-x86_64'
 
-import carla
-from carla import Transform, Location, Rotation, VehicleControl, Vector3D
+    # 搜索路径列表
+    search_paths = [
+        # 相对路径
+        '../carla/dist/',
+        # 用户主目录
+        os.path.expanduser('~/CARLA_*/PythonAPI/carla/dist/'),
+        os.path.expanduser('~/carla/PythonAPI/carla/dist/'),
+        # 环境变量
+        os.path.join(os.environ.get('CARLA_ROOT', ''), 'PythonAPI/carla/dist/'),
+        # 常见安装位置
+        '/opt/carla/PythonAPI/carla/dist/',
+        '/usr/local/carla/PythonAPI/carla/dist/',
+    ]
+
+    # 首先尝试匹配当前Python版本
+    for path in search_paths:
+        if not path:
+            continue
+        pattern = os.path.join(path, f'carla-*{sys.version_info.major}.{sys.version_info.minor}-{platform_str}.egg')
+        matches = glob.glob(os.path.expanduser(pattern))
+        if matches:
+            sys.path.append(matches[0])
+            return matches[0]
+
+    # 如果没找到，尝试任何Python 3.x版本（向下兼容）
+    for path in search_paths:
+        if not path:
+            continue
+        pattern = os.path.join(path, f'carla-*py3.*-{platform_str}.egg')
+        matches = glob.glob(os.path.expanduser(pattern))
+        if matches:
+            # 按版本号排序，选择最新的
+            matches.sort(reverse=True)
+            sys.path.append(matches[0])
+            print(f"警告: 使用CARLA egg {matches[0]}，与当前Python {sys.version_info.major}.{sys.version_info.minor}可能不完全兼容")
+            return matches[0]
+
+    return None
+
+# 尝试查找并添加CARLA
+_carla_egg = _find_and_add_carla_egg()
+if _carla_egg is None:
+    import warnings
+    warnings.warn(
+        "未找到CARLA .egg文件。请确保CARLA已安装，或设置CARLA_ROOT环境变量。"
+        "例如: export CARLA_ROOT=/home/zwt/CARLA_0.9.15"
+    )
+
+try:
+    import carla
+    from carla import Transform, Location, Rotation, VehicleControl, Vector3D
+except ImportError as e:
+    raise ImportError(
+        f"无法导入CARLA库: {e}\n"
+        f"请确保:\n"
+        f"  1. CARLA已安装\n"
+        f"  2. Python版本兼容（CARLA通常需要Python 3.7-3.8）\n"
+        f"  3. 设置环境变量: export CARLA_ROOT=/path/to/CARLA\n"
+        f"找到的egg文件: {_carla_egg}"
+    )
 
 # 导入项目类型
 from carla_c2osr.env.types import AgentState, EgoState, WorldState, AgentType
