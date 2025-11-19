@@ -21,7 +21,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 import time
 
@@ -29,22 +29,29 @@ import time
 _repo_root = Path(__file__).resolve().parents[1]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
+    
+_src_path = _repo_root / "src"
+if _src_path.exists() and str(_src_path) not in sys.path:
+    sys.path.insert(0, str(_src_path))
 
 # C2OSR算法组件
-from carla_c2osr.algorithms.c2osr import (
-    create_c2osr_planner,
+from c2o_drive.algorithms.c2osr.factory import create_c2osr_planner
+from c2o_drive.algorithms.c2osr.config import (
     C2OSRPlannerConfig,
     LatticePlannerConfig,
     QValueConfig,
     GridConfig,
     DirichletConfig,
+    RewardWeightsConfig,
 )
 
 # CARLA环境组件
-from carla_c2osr.environments import CarlaEnvironment
-from carla_c2osr.env.carla_scenarios import CarlaScenarioLibrary, get_scenario, list_scenarios
-from carla_c2osr.core.planner import Transition
-from carla_c2osr.config.global_config import GlobalConfig, CarlaConfig
+from c2o_drive.environments.carla_env import CarlaEnvironment
+from c2o_drive.environments.carla.scenarios import CarlaScenarioLibrary, get_scenario, list_scenarios
+from c2o_drive.core.planner import Transition
+from c2o_drive.core.types import EgoControl
+from c2o_drive.config import get_global_config
+from visualization_utils import EpisodeVisualizer, create_visualization_pipeline
 
 
 class CarlaEpisodeRunner:
@@ -56,14 +63,20 @@ class CarlaEpisodeRunner:
         env: CarlaEnvironment,
         output_dir: Optional[Path] = None,
         verbose: bool = True,
-        save_trajectory: bool = True,
+        q_tracker=None,
+        global_visualizer=None,
+        visualize_distributions: bool = True,
+        vis_interval: int = 5,
     ):
         self.planner = planner
         self.env = env
         self.output_dir = output_dir or Path("outputs/c2osr_carla")
         self.verbose = verbose
-        self.save_trajectory = save_trajectory
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.q_tracker = q_tracker
+        self.global_visualizer = global_visualizer
+        self.visualize_distributions = visualize_distributions
+        self.vis_interval = max(1, vis_interval)
 
     def run_episode(
         self,
@@ -98,39 +111,119 @@ class CarlaEpisodeRunner:
             scenario_def = get_scenario(scenario_name)
             options['scenario_config'] = {
                 'scenario': scenario_def,
+                'scenario_name': scenario_name,
             }
+            reference_path = CarlaScenarioLibrary.get_reference_path(
+                scenario_def,
+                horizon=self.planner.config.horizon,
+                dt=self.planner.config.lattice.dt,
+            )
+            options['reference_path'] = reference_path
             if self.verbose:
                 print(f"场景: {scenario_def.description}")
                 print(f"难度: {scenario_def.difficulty}")
 
         state, info = self.env.reset(seed=seed, options=options)
+        initial_world_state = state
         self.planner.reset()
 
-        # Episode统计
+        reference_path = info.get('reference_path', [])
+        if reference_path:
+            reference_path = [(float(p[0]), float(p[1])) for p in reference_path]
+            self.planner.current_reference_path = reference_path
+
+        if self.verbose:
+            print("  生成候选轨迹...")
+
+        trajectory_q_values = self._generate_and_evaluate_trajectories(state, reference_path)
+        if not trajectory_q_values:
+            if self.verbose:
+                print("  ✗ 没有有效轨迹可执行")
+            return {
+                'episode_id': episode_id,
+                'steps': 0,
+                'total_reward': 0.0,
+                'outcome': 'planning_failed',
+                'collision': False,
+                'episode_time': 0.0,
+                'scenario_name': scenario_name or 'default',
+                'selected_trajectory_info': None,
+                'gif_path': '',
+                'trajectory_q_values': [],
+            }
+
+        selected_trajectory, selected_info = self._select_optimal_trajectory(trajectory_q_values)
+        if self.verbose:
+            print(f"  选中轨迹 {selected_info['trajectory_id']}: "
+                  f"P{int(selected_info['selection_percentile']*100)}_Q="
+                  f"{selected_info['percentile_q']:.2f}, "
+                  f"Min_Q={selected_info['min_q']:.2f}, "
+                  f"Mean_Q={selected_info['mean_q']:.2f}")
+
+        episode_visualizer = EpisodeVisualizer(
+            episode_id=episode_id,
+            output_dir=self.output_dir,
+            grid_mapper=self.planner.grid_mapper,
+            world_state=initial_world_state,
+            horizon=self.planner.config.lattice.horizon,
+            verbose=self.verbose,
+        )
+        episode_visualizer.visualize_trajectory_selection(trajectory_q_values, selected_info)
+
+        if self.visualize_distributions and (episode_id % self.vis_interval == 0):
+            episode_visualizer.visualize_distributions(
+                q_calculator=self.planner.q_value_calculator,
+                world_state=initial_world_state,
+                ego_action_trajectory=selected_info['waypoints'],
+                trajectory_buffer=self.planner.trajectory_buffer,
+                bank=self.planner.dirichlet_bank,
+            )
+
+        if self.q_tracker is not None:
+            self.q_tracker.add_all_trajectories_data(episode_id, trajectory_q_values)
+            self.q_tracker.add_episode_data(
+                episode_id=episode_id,
+                q_value=selected_info.get('percentile_q', 0.0),
+                q_distribution=list(selected_info.get('q_values', [])),
+                collision_rate=selected_info.get('collision_rate', 0.0),
+                detailed_info=selected_info.get('detailed_info', {}),
+            )
+            if self.global_visualizer is not None:
+                self.global_visualizer.visualize_q_evolution(episode_id)
+
+        num_waypoints = len(selected_trajectory.waypoints)
+        if num_waypoints < 2:
+            if self.verbose:
+                print("  ✗ 选中轨迹缺少waypoints")
+            return {
+                'episode_id': episode_id,
+                'steps': 0,
+                'total_reward': 0.0,
+                'outcome': 'planning_failed',
+                'collision': False,
+                'episode_time': time.time() - episode_start_time,
+                'scenario_name': scenario_name or 'default',
+                'selected_trajectory_info': selected_info,
+                'gif_path': '',
+                'trajectory_q_values': trajectory_q_values,
+            }
+
+        if max_steps > num_waypoints - 1:
+            if self.verbose:
+                print(f"  调整: max_steps从{max_steps}调整为{num_waypoints - 1}（轨迹长度限制）")
+            max_steps = num_waypoints - 1
+
         total_reward = 0.0
         steps = 0
         outcome = 'success'
         collision_occurred = False
+        last_action = EgoControl(throttle=0.0, steer=0.0, brake=0.0)
 
-        # 主循环
         for step in range(max_steps):
-            # 选择动作
-            try:
-                action = self.planner.select_action(
-                    observation=state,
-                    deterministic=False,
-                    reference_path=info.get('reference_path'),
-                )
-            except Exception as e:
-                if self.verbose:
-                    print(f"  ✗ 规划失败: {e}")
-                outcome = 'planning_failed'
-                break
-
-            # 执行动作
+            action = self._trajectory_to_control(state, selected_trajectory, step)
+            last_action = action
             step_result = self.env.step(action)
 
-            # 更新规划器
             transition = Transition(
                 state=state,
                 action=action,
@@ -142,23 +235,28 @@ class CarlaEpisodeRunner:
             )
             self.planner.update(transition)
 
-            # 更新统计
+            if episode_visualizer is not None:
+                prob_grid, reachable_sets = self._prepare_timestep_visualization(step_result.observation)
+                buffer_size = len(self.planner.trajectory_buffer)
+                total_alpha = self._compute_total_alpha()
+                episode_visualizer.render_timestep_heatmap(
+                    timestep=step + 1,
+                    current_world_state=step_result.observation,
+                    prob_grid=prob_grid,
+                    multi_timestep_reachable_sets=reachable_sets,
+                    buffer_size=buffer_size,
+                    matched_transitions=None,
+                    total_alpha=total_alpha,
+                )
+
             total_reward += step_result.reward
             steps += 1
             state = step_result.observation
 
-            # 输出进度
-            if self.verbose and (step + 1) % 10 == 0:
-                collision_info = ""
-                if step_result.info.get('collision_sensor'):
-                    collision_info = " [碰撞传感器触发]"
-                print(f"  Step {step+1}/{max_steps}: "
-                      f"reward={step_result.reward:.2f}, "
-                      f"total={total_reward:.2f}, "
-                      f"accel={step_result.info.get('acceleration', 0):.2f}"
-                      f"{collision_info}")
+            if self.verbose:
+                print(f"  Step {step+1}/{max_steps}: reward={step_result.reward:.2f}, "
+                      f"total={total_reward:.2f}")
 
-            # 检查终止条件
             if step_result.terminated:
                 outcome = 'collision'
                 collision_occurred = True
@@ -169,23 +267,31 @@ class CarlaEpisodeRunner:
             if step_result.truncated:
                 outcome = 'timeout'
                 if self.verbose:
-                    print(f"  ⏱ 达到最大步数")
+                    print(f"  ⏱ Episode在第{steps}步因truncated结束")
                 break
+
+        if outcome == 'success':
+            final_transition = Transition(
+                state=state,
+                action=last_action,
+                reward=0.0,
+                next_state=state,
+                terminated=False,
+                truncated=True,
+                info={},
+            )
+            self.planner.update(final_transition)
 
         episode_time = time.time() - episode_start_time
 
         if outcome == 'success' and self.verbose:
             print(f"  ✓ 成功完成{steps}步！")
 
-        # 保存轨迹
-        trajectory_file = ""
-        if self.save_trajectory:
-            trajectory = self.env.get_episode_trajectory()
-            if len(trajectory) > 0:
-                trajectory_file = self.output_dir / f"trajectory_ep{episode_id}.npy"
-                np.save(trajectory_file, trajectory)
-                if self.verbose:
-                    print(f"  轨迹已保存: {trajectory_file}")
+        gif_path = ""
+        if episode_visualizer is not None:
+            gif_path = episode_visualizer.generate_episode_gif()
+            if self.global_visualizer is not None and episode_visualizer.frame_paths:
+                self.global_visualizer.add_summary_frame(episode_visualizer.frame_paths[-1])
 
         # 统计信息
         stats = {
@@ -195,8 +301,10 @@ class CarlaEpisodeRunner:
             'outcome': outcome,
             'collision': collision_occurred,
             'episode_time': episode_time,
-            'trajectory_file': str(trajectory_file),
             'scenario_name': scenario_name or 'default',
+            'selected_trajectory_info': selected_info,
+            'gif_path': gif_path,
+            'trajectory_q_values': trajectory_q_values,
         }
 
         if self.verbose:
@@ -205,65 +313,253 @@ class CarlaEpisodeRunner:
 
         return stats
 
+    def _generate_and_evaluate_trajectories(
+        self,
+        state,
+        reference_path: List,
+    ) -> List[Dict[str, Any]]:
+        """生成并评估候选轨迹"""
+        ego_state_tuple = (
+            state.ego.position_m[0],
+            state.ego.position_m[1],
+            state.ego.yaw_rad,
+        )
 
-def create_planner_config(args) -> C2OSRPlannerConfig:
+        ref_path = reference_path or None
+        if ref_path is None:
+            ego_x, ego_y = state.ego.position_m
+            ref_path = [
+                (ego_x + i * 5.0, ego_y)
+                for i in range(self.planner.config.lattice.horizon + 1)
+            ]
+
+        candidate_trajectories = self.planner.lattice_planner.generate_trajectories(
+            reference_path=ref_path,
+            horizon=self.planner.config.lattice.horizon,
+            dt=self.planner.config.lattice.dt,
+            ego_state=ego_state_tuple,
+        )
+
+        trajectory_q_values: List[Dict[str, Any]] = []
+
+        for traj_idx, trajectory in enumerate(candidate_trajectories):
+            try:
+                q_values_list, detailed_info = self.planner.q_value_calculator.compute_q_value(
+                    current_world_state=state,
+                    ego_action_trajectory=trajectory.waypoints,
+                    trajectory_buffer=self.planner.trajectory_buffer,
+                    grid=self.planner.grid_mapper,
+                    bank=self.planner.dirichlet_bank,
+                    reference_path=ref_path,
+                )
+
+                if len(q_values_list) == 0:
+                    continue
+
+                min_q = float(np.min(q_values_list))
+                mean_q = float(np.mean(q_values_list))
+                max_q = float(np.max(q_values_list))
+
+                percentile = self.planner.config.q_value.selection_percentile
+                if percentile == 0.0:
+                    percentile_q = min_q
+                elif percentile == 1.0:
+                    percentile_q = max_q
+                else:
+                    percentile_q = float(np.percentile(q_values_list, percentile * 100))
+
+                collision_rate = detailed_info.get('reward_breakdown', {}).get('collision_rate', 0.0)
+
+                trajectory_q_values.append({
+                    'trajectory_id': traj_idx,
+                    'trajectory': trajectory,
+                    'waypoints': trajectory.waypoints,
+                    'lateral_offset': getattr(trajectory, 'lateral_offset', 0.0),
+                    'target_speed': getattr(trajectory, 'target_speed', 0.0),
+                    'min_q': min_q,
+                    'mean_q': mean_q,
+                    'max_q': max_q,
+                    'percentile_q': percentile_q,
+                    'selection_percentile': percentile,
+                    'collision_rate': collision_rate,
+                    'q_values': q_values_list,
+                    'detailed_info': detailed_info,
+                })
+            except Exception:
+                continue
+
+        return trajectory_q_values
+
+    def _select_optimal_trajectory(
+        self,
+        trajectory_q_values: List[Dict[str, Any]],
+    ):
+        """根据百分位Q值选择最优轨迹"""
+        best = max(trajectory_q_values, key=lambda t: t['percentile_q'])
+        return best['trajectory'], best
+
+    def _trajectory_to_control(
+        self,
+        current_state,
+        trajectory,
+        step_idx: int,
+    ) -> EgoControl:
+        """将轨迹waypoint转换为控制指令"""
+        if step_idx + 1 >= len(trajectory.waypoints):
+            return EgoControl(throttle=0.0, steer=0.0, brake=1.0)
+
+        target_x, target_y = trajectory.waypoints[step_idx + 1]
+        current_x, current_y = current_state.ego.position_m
+
+        dx = target_x - current_x
+        dy = target_y - current_y
+        target_heading = np.arctan2(dy, dx)
+        heading_error = target_heading - current_state.ego.yaw_rad
+        heading_error = np.arctan2(np.sin(heading_error), np.cos(heading_error))
+
+        steer = np.clip(heading_error * 0.5, -1.0, 1.0)
+
+        current_speed = np.linalg.norm(np.array(current_state.ego.velocity_mps))
+        speed_error = trajectory.target_speed - current_speed
+
+        if speed_error > 0.5:
+            throttle = 0.6
+            brake = 0.0
+        elif speed_error < -0.5:
+            throttle = 0.0
+            brake = 0.5
+        else:
+            throttle = 0.3
+            brake = 0.0
+
+        return EgoControl(throttle=throttle, steer=steer, brake=brake)
+
+    def _prepare_timestep_visualization(self, state) -> tuple[np.ndarray, Dict[int, Dict[int, List[int]]]]:
+        """准备多时间步可视化数据"""
+        config = self.planner.config
+        multi_timestep_reachable_sets: Dict[int, Dict[int, List[int]]] = {}
+
+        for i, agent in enumerate(state.agents):
+            agent_id = i + 1
+            try:
+                multi_reachable = self.planner.grid_mapper.multi_timestep_successor_cells(
+                    agent,
+                    horizon=config.lattice.horizon,
+                    dt=config.lattice.dt,
+                    n_samples=50,
+                )
+                multi_timestep_reachable_sets[agent_id] = multi_reachable
+            except Exception:
+                current_cell = self.planner.grid_mapper.world_to_cell(agent.position_m)
+                multi_timestep_reachable_sets[agent_id] = {
+                    t: [current_cell] for t in range(1, config.lattice.horizon + 1)
+                }
+
+        K = self.planner.grid_mapper.K
+        prob_grid = np.ones(K, dtype=float) / float(K)
+        return prob_grid, multi_timestep_reachable_sets
+
+    def _compute_total_alpha(self) -> float:
+        """计算Dirichlet bank中的总alpha值"""
+        bank = getattr(self.planner, "dirichlet_bank", None)
+        if bank is None:
+            return 0.0
+
+        total_alpha = 0.0
+        for agent_data in bank.agent_alphas.values():
+            for alpha_vec in agent_data.values():
+                total_alpha += float(alpha_vec.sum())
+        return total_alpha
+
+
+def create_planner_config(args, grid_center: Optional[Tuple[float, float]] = None) -> C2OSRPlannerConfig:
     """根据命令行参数创建规划器配置"""
 
-    # 应用配置预设
+    gc = get_global_config()
+    grid_half = args.grid_size / 2.0
+    dt = args.dt if args.dt is not None else gc.time.dt
+    center_x, center_y = grid_center if grid_center is not None else (0.0, 0.0)
+    bounds_x = (center_x - grid_half, center_x + grid_half)
+    bounds_y = (center_y - grid_half, center_y + grid_half)
+
+    def build_dirichlet_config() -> DirichletConfig:
+        return DirichletConfig(
+            alpha_in=gc.dirichlet.alpha_in,
+            alpha_out=gc.dirichlet.alpha_out,
+            learning_rate=gc.dirichlet.learning_rate,
+            use_multistep=True,
+            use_optimized=True,
+        )
+
+    def build_reward_weights() -> RewardWeightsConfig:
+        r = gc.reward
+        return RewardWeightsConfig(
+            collision_penalty=r.collision_penalty,
+            collision_threshold=r.collision_threshold,
+            collision_check_cell_radius=r.collision_check_cell_radius,
+            comfort_weight=r.comfort_weight,
+            efficiency_weight=r.efficiency_weight,
+            safety_weight=r.safety_weight,
+            max_accel_penalty=r.max_accel_penalty,
+            max_jerk_penalty=r.max_jerk_penalty,
+            acceleration_penalty_weight=r.acceleration_penalty_weight,
+            jerk_penalty_weight=r.jerk_penalty_weight,
+            max_comfortable_accel=r.max_comfortable_accel,
+            speed_reward_weight=r.speed_reward_weight,
+            target_speed=r.target_speed,
+            progress_reward_weight=r.progress_reward_weight,
+            safe_distance=r.safe_distance,
+            distance_penalty_weight=r.distance_penalty_weight,
+            centerline_offset_penalty_weight=r.centerline_offset_penalty_weight,
+        )
+
+    def build_q_value_config(n_samples: Optional[int] = None) -> QValueConfig:
+        return QValueConfig(
+            n_samples=n_samples if n_samples is not None else gc.sampling.q_value_samples,
+            selection_percentile=gc.c2osr.q_selection_percentile,
+            gamma=gc.c2osr.gamma,
+        )
+
+    common_kwargs = dict(
+        horizon=args.horizon,
+        dirichlet=build_dirichlet_config(),
+        reward_weights=build_reward_weights(),
+        trajectory_storage_multiplier=gc.matching.trajectory_storage_multiplier,
+        learning_rate=gc.dirichlet.learning_rate,
+        gamma=gc.c2osr.gamma,
+    )
+
     if args.config_preset == "fast":
-        # 快速测试配置
         lattice_config = LatticePlannerConfig(
             lateral_offsets=[-2.0, 0.0, 2.0],
             speed_variations=[4.0],
-            dt=args.dt,
-            horizon=args.horizon,
+            dt=dt,
         )
-        q_value_config = QValueConfig(
-            n_samples=20,
-            horizon=args.horizon,
-        )
+        q_value_config = build_q_value_config(n_samples=20)
     elif args.config_preset == "high-precision":
-        # 高精度配置
         lattice_config = LatticePlannerConfig(
             lateral_offsets=[-4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0],
             speed_variations=[3.0, 4.0, 5.0],
-            dt=args.dt,
-            horizon=args.horizon,
+            dt=dt,
         )
-        q_value_config = QValueConfig(
-            n_samples=100,
-            horizon=args.horizon,
-        )
+        q_value_config = build_q_value_config(n_samples=100)
     else:
-        # 默认配置
         lattice_config = LatticePlannerConfig(
             lateral_offsets=[-3.0, -2.0, 0.0, 2.0, 3.0],
             speed_variations=[4.0],
-            dt=args.dt,
-            horizon=args.horizon,
+            dt=dt,
         )
-        q_value_config = QValueConfig(
-            n_samples=50,
-            horizon=args.horizon,
-        )
+        q_value_config = build_q_value_config()
 
-    # 创建配置
     config = C2OSRPlannerConfig(
-        horizon=args.horizon,
         grid=GridConfig(
-            grid_size_m=args.grid_size,
-            cell_size_m=0.5,
-            x_min=-args.grid_size,
-            x_max=args.grid_size,
-            y_min=-args.grid_size,
-            y_max=args.grid_size,
-        ),
-        dirichlet=DirichletConfig(
-            alpha_in=50.0,
-            alpha_out=1e-6,
+            grid_size_m=gc.grid.cell_size_m,
+            bounds_x=bounds_x,
+            bounds_y=bounds_y,
         ),
         lattice=lattice_config,
         q_value=q_value_config,
+        **common_kwargs,
     )
 
     return config
@@ -280,7 +576,7 @@ def parse_arguments():
   python run_c2osr_carla.py
 
   # 指定场景
-  python run_c2osr_carla.py --scenario oncoming_medium
+  python run_c2osr_carla.py --scenario s4_wrong_way
 
   # 自定义配置
   python run_c2osr_carla.py --town Town04 --num-vehicles 20 --episodes 5
@@ -288,16 +584,15 @@ def parse_arguments():
   # 查看所有可用场景
   python run_c2osr_carla.py --list-scenarios
 
-可用场景: oncoming_easy, oncoming_medium, oncoming_hard, lane_change_left,
-          lane_change_right, overtake, intersection, multi_agent, highway
+可用场景: s4_wrong_way
         """
     )
 
     # 基本运行参数
     parser.add_argument("--episodes", type=int, default=5,
                        help="执行episode数")
-    parser.add_argument("--max-steps", type=int, default=500,
-                       help="每个episode的最大步数")
+    parser.add_argument("--max-steps", type=int, default=None,
+                       help="每个episode的最大步数（默认等于horizon）")
     parser.add_argument("--seed", type=int, default=2025,
                        help="随机种子")
 
@@ -326,22 +621,29 @@ def parse_arguments():
                        choices=["default", "fast", "high-precision"],
                        default="default",
                        help="配置预设")
-    parser.add_argument("--horizon", type=int, default=10,
-                       help="规划时域（步数）")
-    parser.add_argument("--dt", type=float, default=0.5,
-                       help="时间步长（秒）")
-    parser.add_argument("--grid-size", type=float, default=50.0,
+    parser.add_argument("--horizon", type=int, default=None,
+                       help="规划时域（步数），默认读取global_config")
+    parser.add_argument("--dt", type=float, default=None,
+                       help="时间步长（秒），默认读取global_config")
+    parser.add_argument("--grid-size", type=float, default=200.0,
                        help="网格大小（米）")
 
     # 输出参数
     parser.add_argument("--output-dir", type=str,
                        default="outputs/c2osr_carla",
                        help="输出目录")
-    parser.add_argument("--save-trajectory", action="store_true",
-                       default=True,
-                       help="保存轨迹数据")
+    parser.add_argument("--visualize-distributions", dest="visualize_distributions",
+                       action="store_true",
+                       help="生成Transition/Dirichlet分布可视化（默认开启）")
+    parser.add_argument("--no-visualize-distributions", dest="visualize_distributions",
+                       action="store_false",
+                       help="禁用Transition/Dirichlet分布可视化")
+    parser.add_argument("--vis-interval", type=int, default=5,
+                       help="分布可视化间隔（episode数）")
     parser.add_argument("--quiet", action="store_true",
                        help="静默模式（减少输出）")
+
+    parser.set_defaults(visualize_distributions=True)
 
     return parser.parse_args()
 
@@ -349,6 +651,13 @@ def parse_arguments():
 def main():
     """主函数"""
     args = parse_arguments()
+    gc = get_global_config()
+    if args.horizon is None:
+        args.horizon = gc.time.default_horizon
+    if args.dt is None:
+        args.dt = gc.time.dt
+    if args.max_steps is None:
+        args.max_steps = args.horizon
 
     # 处理--list-scenarios
     if args.list_scenarios:
@@ -383,10 +692,30 @@ def main():
     print(f"  网格大小: {args.grid_size}m")
     print(f"  种子: {args.seed}")
 
+    scenario_def_for_planner = None
+    grid_center = None
+    if args.scenario:
+        try:
+            scenario_def_for_planner = get_scenario(args.scenario)
+            grid_center = (
+                float(scenario_def_for_planner.ego_spawn[0]),
+                float(scenario_def_for_planner.ego_spawn[1]),
+            )
+        except Exception:
+            grid_center = None
+
     # 创建输出目录
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"\n输出目录: {output_dir}")
+
+    enable_visualization = not args.quiet
+    q_tracker, global_visualizer = create_visualization_pipeline(
+        output_dir=output_dir,
+        enable_visualization=enable_visualization,
+    )
+    if enable_visualization:
+        print(f"✓ 可视化管道已创建")
 
     # 创建环境
     print(f"\n正在连接CARLA服务器...")
@@ -399,6 +728,7 @@ def main():
             max_episode_steps=args.max_steps,
             num_vehicles=args.num_vehicles,
             num_pedestrians=args.num_pedestrians,
+            no_rendering=args.no_rendering,
         )
         print(f"✓ 成功连接到CARLA服务器")
     except Exception as e:
@@ -410,7 +740,7 @@ def main():
 
     # 创建规划器
     print(f"\n创建C2OSR规划器...")
-    planner_config = create_planner_config(args)
+    planner_config = create_planner_config(args, grid_center=grid_center)
     planner = create_c2osr_planner(planner_config)
     print(f"✓ 规划器创建完成")
 
@@ -420,7 +750,10 @@ def main():
         env=env,
         output_dir=output_dir,
         verbose=not args.quiet,
-        save_trajectory=args.save_trajectory,
+        q_tracker=q_tracker,
+        global_visualizer=global_visualizer,
+        visualize_distributions=args.visualize_distributions,
+        vis_interval=args.vis_interval,
     )
 
     # 运行episodes
@@ -474,10 +807,12 @@ def main():
         print(f"总用时: {total_time:.1f}s")
         print(f"平均episode用时: {total_time/total_episodes:.1f}s")
 
-        # 保存统计数据
-        stats_file = output_dir / "experiment_stats.npy"
-        np.save(stats_file, all_stats)
-        print(f"\n统计数据已保存: {stats_file}")
+    if enable_visualization and global_visualizer is not None:
+        print(f"\n生成全局可视化...")
+        summary_gif = global_visualizer.generate_summary_gif()
+        if summary_gif:
+            print(f"  ✓ 汇总 GIF: {summary_gif}")
+        global_visualizer.generate_final_plots()
 
     # 清理
     print(f"\n清理资源...")

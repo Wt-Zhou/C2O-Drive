@@ -9,17 +9,17 @@ from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 import numpy as np
 
-# 导入原有的可视化函数
-from carla_c2osr.visualization.vis import grid_heatmap, make_gif
-from carla_c2osr.visualization.lattice_visualizer import (
+# 导入可视化函数
+from c2o_drive.visualization.vis import grid_heatmap, make_gif
+from c2o_drive.visualization.lattice_visualizer import (
     visualize_lattice_selection,
     visualize_lattice_trajectories_detailed
 )
-from carla_c2osr.visualization.transition_visualizer import (
+from c2o_drive.visualization.transition_visualizer import (
     visualize_transition_distributions,
     visualize_dirichlet_distributions
 )
-from carla_c2osr.evaluation.q_distribution_tracker import QDistributionTracker
+from c2o_drive.evaluation.q_distribution_tracker import QDistributionTracker
 
 
 class EpisodeVisualizer:
@@ -136,11 +136,11 @@ class EpisodeVisualizer:
         """
         # 转换自车和 agents 的位置到网格坐标
         ego_pos_m = current_world_state.ego.position_m
-        ego_xy = np.array(ego_pos_m)
+        ego_xy = np.array(self.grid_mapper.to_grid_frame(ego_pos_m))
 
         agents_xy = []
         for agent in current_world_state.agents:
-            agents_xy.append(np.array(agent.position_m))
+            agents_xy.append(np.array(self.grid_mapper.to_grid_frame(agent.position_m)))
 
         # 输出路径
         frame_path = str(self.episode_dir / f"t_{timestep:02d}.png")
@@ -222,7 +222,7 @@ class EpisodeVisualizer:
 
             # 获取 transition 分布数据
             agent_transition_samples = q_calculator._build_agent_transition_distributions(
-                world_state,
+                self.world_state,
                 ego_action_trajectory,
                 trajectory_buffer,
                 self.grid_mapper,
@@ -233,7 +233,7 @@ class EpisodeVisualizer:
             # 可视化 transition 分布
             visualize_transition_distributions(
                 agent_transition_samples=agent_transition_samples,
-                current_world_state=world_state,
+                current_world_state=self.world_state,
                 grid=self.grid_mapper,
                 episode_idx=self.episode_id,
                 output_dir=self.episode_dir
@@ -242,7 +242,7 @@ class EpisodeVisualizer:
             # 可视化 Dirichlet 分布
             visualize_dirichlet_distributions(
                 bank=bank,
-                current_world_state=world_state,
+                current_world_state=self.world_state,
                 grid=self.grid_mapper,
                 episode_idx=self.episode_id,
                 output_dir=self.episode_dir
@@ -255,6 +255,7 @@ class EpisodeVisualizer:
             print(f"  警告: 分布可视化失败: {e}")
             import traceback
             traceback.print_exc()
+
 
 
 class GlobalVisualizer:

@@ -1,0 +1,10 @@
+from __future__ import annotations
+from c2o_drive.environments.carla.types import EgoState
+from c2o_drive.algorithms.c2osr.lattice import generate_lattice_controls
+
+
+def test_generate_lattice_len() -> None:
+    ego = EgoState(position_m=(0.0, 0.0), velocity_mps=(0.0, 0.0), yaw_rad=0.0)
+    trajs = generate_lattice_controls(ego, horizon=5)
+    assert len(trajs) >= 3
+    assert all(len(t.controls) == 5 for t in trajs)

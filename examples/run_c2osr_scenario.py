@@ -26,18 +26,25 @@ _repo_root = Path(__file__).resolve().parents[1]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
+_src_path = _repo_root / "src"
+if _src_path.exists() and str(_src_path) not in sys.path:
+    sys.path.insert(0, str(_src_path))
+
 # 新架构组件
-from carla_c2osr.algorithms.c2osr import (
-    create_c2osr_planner,
+from c2o_drive.algorithms.c2osr.factory import create_c2osr_planner
+from c2o_drive.algorithms.c2osr.config import (
     C2OSRPlannerConfig,
     LatticePlannerConfig,
     QValueConfig,
     GridConfig,
     DirichletConfig,
+    RewardWeightsConfig,
 )
-from carla_c2osr.environments import ScenarioReplayEnvironment
-from carla_c2osr.env.scenario_manager import ScenarioManager
-from carla_c2osr.core.planner import Transition
+from c2o_drive.environments.scenario_replay_env import ScenarioReplayEnvironment
+from c2o_drive.environments.virtual.scenario_manager import ScenarioManager
+from c2o_drive.core.planner import Transition
+from c2o_drive.core.types import EgoControl
+from c2o_drive.config import get_global_config
 
 # 可视化组件
 from visualization_utils import (
@@ -204,12 +211,19 @@ class EpisodeRunner:
 
         actual_steps = min(max_steps, num_waypoints - 1)  # -1 because we start from current position
 
-        for step in range(actual_steps):
-            # 将轨迹点转换为控制动作
-            action = self._trajectory_to_control(state, selected_trajectory, step)
+        direct_waypoint_follow = hasattr(self.env, "step_to_waypoint")
+        last_action: EgoControl = EgoControl(throttle=0.0, steer=0.0, brake=0.0)
 
-            # 执行动作
-            step_result = self.env.step(action)
+        for step in range(actual_steps):
+            if direct_waypoint_follow:
+                target_wp = selected_trajectory.waypoints[step + 1]
+                step_result = self.env.step_to_waypoint(target_wp)
+                action = EgoControl(throttle=0.0, steer=0.0, brake=0.0)
+            else:
+                action = self._trajectory_to_control(state, selected_trajectory, step)
+                step_result = self.env.step(action)
+
+            last_action = action
 
             # ========== 可视化当前时间步 ==========
             if episode_visualizer is not None:
@@ -281,7 +295,7 @@ class EpisodeRunner:
         if outcome == 'success':
             final_transition = Transition(
                 state=state,
-                action=action,
+                action=last_action,
                 reward=0.0,
                 next_state=state,
                 terminated=False,
@@ -566,81 +580,103 @@ class StatisticsCollector:
 
 
 def create_planner_config(args) -> C2OSRPlannerConfig:
-    """创建规划器配置
+    """创建规划器配置"""
 
-    Args:
-        args: 命令行参数
-
-    Returns:
-        C2OSRPlannerConfig 实例
-    """
-    # 根据预设创建配置
+    gc = get_global_config()
     grid_half = args.grid_size / 2.0
+    dt = args.dt if args.dt is not None else gc.time.dt
+
+    def build_dirichlet_config() -> DirichletConfig:
+        return DirichletConfig(
+            alpha_in=gc.dirichlet.alpha_in,
+            alpha_out=gc.dirichlet.alpha_out,
+            learning_rate=gc.dirichlet.learning_rate,
+            use_multistep=True,
+            use_optimized=True,
+        )
+
+    def build_reward_weights() -> RewardWeightsConfig:
+        r = gc.reward
+        return RewardWeightsConfig(
+            collision_penalty=r.collision_penalty,
+            collision_threshold=r.collision_threshold,
+            collision_check_cell_radius=r.collision_check_cell_radius,
+            comfort_weight=r.comfort_weight,
+            efficiency_weight=r.efficiency_weight,
+            safety_weight=r.safety_weight,
+            max_accel_penalty=r.max_accel_penalty,
+            max_jerk_penalty=r.max_jerk_penalty,
+            acceleration_penalty_weight=r.acceleration_penalty_weight,
+            jerk_penalty_weight=r.jerk_penalty_weight,
+            max_comfortable_accel=r.max_comfortable_accel,
+            speed_reward_weight=r.speed_reward_weight,
+            target_speed=r.target_speed,
+            progress_reward_weight=r.progress_reward_weight,
+            safe_distance=r.safe_distance,
+            distance_penalty_weight=r.distance_penalty_weight,
+            centerline_offset_penalty_weight=r.centerline_offset_penalty_weight,
+        )
+
+    def build_q_value_config(n_samples: int | None = None) -> QValueConfig:
+        return QValueConfig(
+            n_samples=n_samples if n_samples is not None else gc.sampling.q_value_samples,
+            selection_percentile=gc.c2osr.q_selection_percentile,
+            gamma=gc.c2osr.gamma,
+        )
+
+    common_kwargs = dict(
+        horizon=args.horizon,
+        dirichlet=build_dirichlet_config(),
+        reward_weights=build_reward_weights(),
+        trajectory_storage_multiplier=gc.matching.trajectory_storage_multiplier,
+        learning_rate=gc.dirichlet.learning_rate,
+        gamma=gc.c2osr.gamma,
+    )
 
     if args.config_preset == "fast":
-        # 快速测试配置
         config = C2OSRPlannerConfig(
-            # 🎯 统一的horizon配置
-            horizon=args.horizon,
-
             grid=GridConfig(
-                grid_size_m=1.0,  # 每个cell 1米
+                grid_size_m=1.0,
                 bounds_x=(-grid_half, grid_half),
                 bounds_y=(-grid_half, grid_half),
             ),
             lattice=LatticePlannerConfig(
-                # horizon由__post_init__自动同步
                 lateral_offsets=[-2.0, 0.0, 2.0],
                 speed_variations=[3.0, 5.0],
-                num_trajectories=6,  # 3×2=6 完整组合
-                dt=args.dt,
+                num_trajectories=6,
+                dt=dt,
             ),
-            q_value=QValueConfig(
-                # horizon由__post_init__自动同步
-                n_samples=20,  # 快速模式：少采样
-            ),
+            q_value=build_q_value_config(n_samples=gc.sampling.q_value_samples),
+            **common_kwargs,
         )
     elif args.config_preset == "high-precision":
-        # 高精度配置
         config = C2OSRPlannerConfig(
-            # 🎯 统一的horizon配置
-            horizon=args.horizon,
-
             grid=GridConfig(
-                grid_size_m=0.5,  # 每个cell 0.5米（更精细）
+                grid_size_m=0.5,
                 bounds_x=(-grid_half, grid_half),
                 bounds_y=(-grid_half, grid_half),
             ),
             lattice=LatticePlannerConfig(
-                # horizon由__post_init__自动同步
-                lateral_offsets=[-4.0, -2.0, 0.0, 2.0, 4.0],  # 更多候选
+                lateral_offsets=[-4.0, -2.0, 0.0, 2.0, 4.0],
                 speed_variations=[2.0, 3.0, 5.0, 7.0],
-                num_trajectories=20,  # 5×4=20 完整组合
-                dt=args.dt,
+                num_trajectories=20,
+                dt=dt,
             ),
-            q_value=QValueConfig(
-                # horizon由__post_init__自动同步
-                n_samples=100,  # 高精度：多采样
-            ),
+            q_value=build_q_value_config(n_samples=gc.sampling.q_value_samples),
+            **common_kwargs,
         )
     else:
-        # 默认配置（使用 config.py 中的默认值）
         config = C2OSRPlannerConfig(
-            # 🎯 统一的horizon配置
-            horizon=args.horizon,
-
             grid=GridConfig(
-                # 只覆盖运行时参数，其他使用 config.py 默认值
+                grid_size_m=gc.grid.cell_size_m,
                 bounds_x=(-grid_half, grid_half),
                 bounds_y=(-grid_half, grid_half),
             ),
             lattice=LatticePlannerConfig(
-                # horizon由__post_init__自动同步，只覆盖dt
-                dt=args.dt,
+                dt=dt,
             ),
-            q_value=QValueConfig(
-                # horizon由__post_init__自动同步
-            ),
+            q_value=build_q_value_config(),
+            **common_kwargs,
         )
 
     return config
@@ -673,8 +709,8 @@ def parse_arguments():
                        help="配置预设")
 
     # 规划参数
-    parser.add_argument("--horizon", type=int, default=10,
-                       help="规划时域（步数）")
+    parser.add_argument("--horizon", type=int, default=None,
+                       help="规划时域（步数），默认读取 global_config.time.default_horizon")
     parser.add_argument("--dt", type=float, default=0.5,
                        help="时间步长（秒）")
     parser.add_argument("--grid-size", type=float, default=50.0,
@@ -701,6 +737,8 @@ def main():
     """主函数"""
     # 1. 解析参数
     args = parse_arguments()
+    if args.horizon is None:
+        args.horizon = get_global_config().time.default_horizon
 
     print(f"{'='*70}")
     print(f" C2OSR + ScenarioManager 实验（新架构版本）")
