@@ -105,27 +105,30 @@ class SACAgent:
         else:
             action, _ = self.actor.sample(state_tensor, deterministic=True)
 
-        return action.cpu().numpy().squeeze()
+        return action.detach().cpu().numpy().squeeze()
 
-    def act(self, world_state: WorldState) -> EgoControl:
-        """Select control action for driving.
+    def select_lattice_params(
+        self, state: np.ndarray, training: bool = True
+    ) -> Tuple[float, float]:
+        """Select lattice parameters (lateral_offset, target_speed).
 
         Args:
-            world_state: Current world state
+            state: Current state
+            training: Whether in training mode (enables exploration)
 
         Returns:
-            Control commands for the ego vehicle
+            Tuple of (lateral_offset in meters, target_speed in m/s)
         """
-        # Convert world state to feature vector
-        state = self._extract_state_features(world_state)
+        # Get normalized action from policy [-1, 1]
+        action = self.select_action(state, training=training)
 
-        # Select continuous action
-        action = self.select_action(state, training=False)
+        # Rescale to lattice parameter ranges
+        # Assumes action[0] -> lateral_offset, action[1] -> target_speed
+        # Note: actual ranges should be configured externally
+        lateral_offset = action[0]  # Will be rescaled in training script
+        target_speed = action[1]    # Will be rescaled in training script
 
-        # Convert continuous action to control
-        control = self._action_to_control(action)
-
-        return control
+        return lateral_offset, target_speed
 
     def store_transition(
         self,
@@ -249,12 +252,14 @@ class SACAgent:
 
         # Ego vehicle features
         ego = world_state.ego
+        # Calculate speed from velocity vector
+        ego_speed = np.linalg.norm(ego.velocity_mps)
         features.extend([
             ego.position_m[0] / 100.0,  # Normalized x position
             ego.position_m[1] / 100.0,  # Normalized y position
-            ego.speed_mps / 30.0,       # Normalized speed
-            np.cos(ego.heading_rad),    # Heading cosine
-            np.sin(ego.heading_rad),    # Heading sine
+            ego_speed / 30.0,            # Normalized speed
+            np.cos(ego.yaw_rad),         # Heading cosine
+            np.sin(ego.yaw_rad),         # Heading sine
         ])
 
         # Goal features (if available)
@@ -271,10 +276,12 @@ class SACAgent:
         for i, agent in enumerate(world_state.agents[:max_agents]):
             rel_x = (agent.position_m[0] - ego.position_m[0]) / 100.0
             rel_y = (agent.position_m[1] - ego.position_m[1]) / 100.0
+            # Calculate agent speed from velocity vector
+            agent_speed = np.linalg.norm(agent.velocity_mps)
             features.extend([
                 rel_x,
                 rel_y,
-                agent.speed_mps / 30.0,
+                agent_speed / 30.0,
                 np.cos(agent.heading_rad),
                 np.sin(agent.heading_rad),
             ])

@@ -129,6 +129,19 @@ class C2OSRPlanner(EpisodicAlgorithmPlanner[WorldState, EgoControl]):
         # Track OBSERVED agent trajectories (key: agent_id, value: list of observed cell IDs per timestep)
         self._episode_agent_observations: Dict[int, List[int]] = {}
 
+        # Episode statistics tracking
+        self._episode_statistics = {
+            'coverage': [],                  # Overall confidence set coverage per episode
+            'coverage_by_timestep': [],      # Per-timestep coverage per episode
+            'returns': [],                   # Episode return per episode
+        }
+        self._current_episode_return = 0.0
+
+        # Safety event tracking
+        self._current_episode_min_distance = float('inf')  # Minimum distance to any agent
+        self._hard_collisions = []        # Binary: 1 if collision occurred, 0 otherwise
+        self._near_misses = []             # Binary: 1 if near miss occurred, 0 otherwise
+
     def _ensure_agents_initialized(self, observation: WorldState) -> None:
         """Ensure all agents are initialized in Dirichlet bank.
 
@@ -345,6 +358,9 @@ class C2OSRPlanner(EpisodicAlgorithmPlanner[WorldState, EgoControl]):
         self._log_stat('reward', transition.reward)
         self._log_stat('step_count', float(self.episode_step_count))
 
+        # Accumulate episode return
+        self._current_episode_return += transition.reward
+
         # Track collisions/successes
         if transition.terminated:
             self._log_stat('episode_terminated', 1.0)
@@ -380,8 +396,42 @@ class C2OSRPlanner(EpisodicAlgorithmPlanner[WorldState, EgoControl]):
                 # This is rare but can happen at environment boundaries
                 pass
 
+        # Track minimum distance to any agent for near miss detection
+        ego_pos = np.array(observation.ego.position_m)
+        for agent in observation.agents:
+            agent_pos = np.array(agent.position_m)
+            distance = np.linalg.norm(ego_pos - agent_pos)
+            self._current_episode_min_distance = min(
+                self._current_episode_min_distance,
+                distance
+            )
+
         # Store episode data when episode ends
         if transition.terminated or transition.truncated:
+            # Calculate confidence set coverage
+            coverage = self._calculate_confidence_set_coverage()
+            coverage_by_timestep = self._calculate_coverage_by_timestep()
+
+            # Record episode statistics
+            self._episode_statistics['coverage'].append(coverage)
+            self._episode_statistics['coverage_by_timestep'].append(coverage_by_timestep)
+            self._episode_statistics['returns'].append(self._current_episode_return)
+
+            # Hard collision (from CARLA collision sensor)
+            collision_occurred = transition.info.get('collision_sensor', False)
+            self._hard_collisions.append(1 if collision_occurred else 0)
+
+            # Near miss (minimum distance < threshold but no collision)
+            from c2o_drive.config import get_global_config
+            near_miss_threshold = get_global_config().safety.near_miss_threshold_m
+
+            is_near_miss = (
+                self._current_episode_min_distance < near_miss_threshold
+                and not collision_occurred
+            )
+            self._near_misses.append(1 if is_near_miss else 0)
+
+            # Store episode data to buffer
             self._store_episode_to_buffer()
             self._episode_id += 1
 
@@ -389,6 +439,8 @@ class C2OSRPlanner(EpisodicAlgorithmPlanner[WorldState, EgoControl]):
             self._current_episode_timesteps = []
             self._current_episode_ego_trajectory = []
             self._episode_agent_observations = {}  # Clear observed trajectories
+            self._current_episode_return = 0.0  # Reset return for next episode
+            self._current_episode_min_distance = float('inf')  # Reset for next episode
 
         return UpdateMetrics(
             loss=0.0,  # C2OSR doesn't have a traditional loss
@@ -591,6 +643,132 @@ class C2OSRPlanner(EpisodicAlgorithmPlanner[WorldState, EgoControl]):
         # Fallback: return repeated first action
         return [first_action] * horizon
 
+    def _calculate_confidence_set_coverage(self) -> float:
+        """Calculate the proportion of agent trajectories that fall within confidence sets.
+
+        Uses sampling-based approach:
+        1. Sample from Dirichlet posterior
+        2. Aggregate samples to get probability distribution
+        3. Select top cells covering 95% probability mass
+        4. Check if observed trajectory falls within this confidence set
+
+        Returns:
+            float: Coverage rate in range [0.0, 1.0]. Returns 0.0 if no data to compare.
+        """
+        from c2o_drive.config import get_global_config
+        config = get_global_config()
+
+        total_checks = 0
+        covered_checks = 0
+
+        # Iterate over all observed agents
+        for agent_id, observed_cells in self._episode_agent_observations.items():
+            # Check if agent is initialized in Dirichlet bank
+            if agent_id not in self.dirichlet_bank.agent_alphas:
+                continue
+
+            # Check each timestep observation
+            for t, observed_cell in enumerate(observed_cells):
+                timestep_key = t + 1  # Timesteps are 1-indexed in Dirichlet bank
+
+                # Get sampling-based confidence set
+                confidence_set = self.dirichlet_bank.get_confidence_set_from_samples(
+                    agent_id=agent_id,
+                    timestep=timestep_key,
+                    confidence_level=config.safety.confidence_level,
+                    n_samples=config.safety.confidence_set_samples
+                )
+
+                if len(confidence_set) > 0:
+                    # Check if observed cell is in the confidence set
+                    if observed_cell in confidence_set:
+                        covered_checks += 1
+                    total_checks += 1
+
+        # Return coverage ratio
+        return covered_checks / total_checks if total_checks > 0 else 0.0
+
+    def _calculate_coverage_by_timestep(self) -> List[float]:
+        """Calculate confidence set coverage separately for each timestep in the prediction horizon.
+
+        Returns per-timestep coverage to analyze how prediction accuracy degrades over the horizon.
+
+        Returns:
+            List[float]: Coverage rate for each timestep. Empty list if no data to compare.
+        """
+        from c2o_drive.config import get_global_config
+        config = get_global_config()
+
+        # Determine max timestep from observations
+        max_timestep = 0
+        for observed_cells in self._episode_agent_observations.values():
+            max_timestep = max(max_timestep, len(observed_cells))
+
+        if max_timestep == 0:
+            return []
+
+        # Initialize counters for each timestep
+        timestep_total = [0] * max_timestep
+        timestep_covered = [0] * max_timestep
+
+        # Iterate over all observed agents
+        for agent_id, observed_cells in self._episode_agent_observations.items():
+            # Check if agent is initialized in Dirichlet bank
+            if agent_id not in self.dirichlet_bank.agent_alphas:
+                continue
+
+            # Check each timestep observation
+            for t, observed_cell in enumerate(observed_cells):
+                timestep_key = t + 1  # Timesteps are 1-indexed in Dirichlet bank
+
+                # Get sampling-based confidence set
+                confidence_set = self.dirichlet_bank.get_confidence_set_from_samples(
+                    agent_id=agent_id,
+                    timestep=timestep_key,
+                    confidence_level=config.safety.confidence_level,
+                    n_samples=config.safety.confidence_set_samples
+                )
+
+                if len(confidence_set) > 0:
+                    # Check if observed cell is in the confidence set
+                    if observed_cell in confidence_set:
+                        timestep_covered[t] += 1
+                    timestep_total[t] += 1
+
+        # Calculate coverage for each timestep
+        coverage_by_timestep = []
+        for covered, total in zip(timestep_covered, timestep_total):
+            if total > 0:
+                coverage_by_timestep.append(covered / total)
+            else:
+                coverage_by_timestep.append(0.0)
+
+        return coverage_by_timestep
+
+    def get_episode_statistics(self) -> Dict[str, List]:
+        """Get collected episode statistics.
+
+        Returns:
+            Dict containing:
+                - 'coverage': List of confidence set coverage per episode
+                - 'coverage_by_timestep': List of per-timestep coverage per episode
+                - 'returns': List of episode returns
+        """
+        return self._episode_statistics
+
+    def get_safety_events(self) -> Dict[str, List[int]]:
+        """Get safety event statistics.
+
+        Returns:
+            Dict containing:
+                - 'hard_collisions': Binary list (1 if collision occurred, 0 otherwise)
+                - 'near_misses': Binary list (1 if near miss occurred, 0 otherwise)
+        """
+        return {
+            'hard_collisions': self._hard_collisions,
+            'near_misses': self._near_misses
+        }
+
     def reset(self) -> None:
         """Reset planner for new episode."""
         super().reset()
@@ -602,6 +780,8 @@ class C2OSRPlanner(EpisodicAlgorithmPlanner[WorldState, EgoControl]):
         self._current_episode_timesteps = []
         self._current_episode_ego_trajectory = []
         self._episode_agent_observations = {}  # Clear observed trajectories
+        self._current_episode_return = 0.0  # Reset return accumulator
+        self._current_episode_min_distance = float('inf')  # Reset minimum distance
 
     def save(self, path: str) -> None:
         """Save planner state to disk.

@@ -35,13 +35,16 @@ class CarlaScenarioLibrary:
     """CARLA 场景库（仅包含 S4 Wrong-way vehicle）"""
 
     _SCENARIOS: Dict[str, ScenarioDefinition] = {}
+    _ALIASES: Dict[str, str] = {
+        "s4": "s4_wrong_way",  # 简化别名
+    }
 
     @staticmethod
     def get_scenario(name: str) -> ScenarioDefinition:
         """根据名称获取场景定义
 
         Args:
-            name: 场景名称
+            name: 场景名称（支持别名，如 "s4" → "s4_wrong_way"）
 
         Returns:
             ScenarioDefinition对象
@@ -49,6 +52,10 @@ class CarlaScenarioLibrary:
         Raises:
             ValueError: 如果场景名称不存在
         """
+        # 检查是否是别名
+        if name in CarlaScenarioLibrary._ALIASES:
+            name = CarlaScenarioLibrary._ALIASES[name]
+
         if not CarlaScenarioLibrary._SCENARIOS:
             CarlaScenarioLibrary._SCENARIOS = {
                 "s4_wrong_way": CarlaScenarioLibrary.wrong_way_vehicle(),
@@ -57,7 +64,8 @@ class CarlaScenarioLibrary:
         if name not in CarlaScenarioLibrary._SCENARIOS:
             raise ValueError(
                 f"Unknown scenario: {name}. "
-                f"Available: {list(CarlaScenarioLibrary._SCENARIOS.keys())}"
+                f"Available: {list(CarlaScenarioLibrary._SCENARIOS.keys())} "
+                f"(aliases: {list(CarlaScenarioLibrary._ALIASES.keys())})"
             )
 
         return CarlaScenarioLibrary._SCENARIOS[name]

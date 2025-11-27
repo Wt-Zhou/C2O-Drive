@@ -33,8 +33,8 @@ class TimeConfig:
 @dataclass 
 class SamplingConfig:
     """采样相关配置"""
-    reachable_set_samples: int = 1000     # 可达集采样数量
-    reachable_set_samples_legacy: int = 1000  # 兼容旧版本的采样数量
+    reachable_set_samples: int = 3000     # 可达集采样数量
+    reachable_set_samples_legacy: int = 3000  # 兼容旧版本的采样数量
     q_value_samples: int = 50           # Q值计算采样数量
     trajectory_samples: int = 50        # 轨迹生成采样数量
 
@@ -167,11 +167,45 @@ class BaselineConfig:
     # SAC配置
     sac_enabled: bool = False
     sac_seed: int = 0
-    
+
+    # SAC网络配置
+    sac_state_dim: int = 128              # 状态特征维度
+    sac_action_dim: int = 2               # 动作维度 [lateral_offset, target_speed]
+    sac_max_action: float = 1.0           # 动作范围 [-1, 1] (会被rescale到实际范围)
+    sac_hidden_dims: tuple = (256, 256)   # 隐藏层维度
+
+    # SAC动作空间范围 (对齐lattice planner)
+    sac_lateral_offset_range: tuple = (-5.0, 5.0)   # 横向偏移范围（米）
+    sac_target_speed_range: tuple = (0.0, 10.0)     # 目标速度范围（m/s）
+
+    # SAC训练超参数
+    sac_learning_rate: float = 3e-4       # Actor和Critic学习率
+    sac_gamma: float = 0.99               # 折扣因子
+    sac_tau: float = 0.005                # 软更新系数
+    sac_alpha: float = 0.2                # 初始熵系数
+    sac_auto_entropy: bool = True         # 自动调节熵系数
+
+    # SAC经验回放配置
+    sac_batch_size: int = 256             # 训练批次大小
+    sac_buffer_size: int = 1000000        # 回放缓冲区大小
+    sac_updates_per_episode: int = 50     # 每个episode结束后的训练次数
+
+    # SAC训练配置
+    sac_num_episodes: int = 1000          # 总训练episodes
+    sac_max_steps_per_episode: int = 500  # 每个episode最大步数
+    sac_device: str = "cuda"              # 训练设备 (cuda/cpu)
+
+    # SAC保存与评估配置
+    sac_save_interval: int = 50           # 模型保存间隔（episodes）
+    sac_eval_interval: int = 10           # 评估间隔（episodes）
+    sac_eval_episodes: int = 5            # 每次评估的episodes数
+    sac_checkpoint_dir: str = "checkpoints/sac_carla"  # 检查点保存目录
+    sac_log_dir: str = "logs/sac_carla"   # TensorBoard日志目录
+
     # Offline CQL配置
     offline_cql_enabled: bool = False
     offline_cql_dataset: str = ""
-    
+
     # Shielded配置
     shielded_enabled: bool = False
     shielded_epsilon: float = 0.1
@@ -240,6 +274,17 @@ class CarlaConfig:
 
 
 @dataclass
+class SafetyConfig:
+    """安全和预测评估相关配置"""
+    # Near miss detection
+    near_miss_threshold_m: float = 3.0       # Near miss距离阈值（米）
+
+    # Confidence set configuration
+    confidence_level: float = 0.95           # Confidence set置信水平（95%）
+    confidence_set_samples: int = 100        # 采样数量（用于叠加计算confidence set）
+
+
+@dataclass
 class AgentTrajectoryConfig:
     """智能体轨迹生成配置"""
     mode: str = "stochastic"  # 轨迹生成模式: "stochastic" | "straight" | "stationary"
@@ -262,6 +307,7 @@ class GlobalConfig:
     scenario: ScenarioConfig = None
     agent_trajectory: AgentTrajectoryConfig = None
     carla: CarlaConfig = None  # CARLA仿真环境配置
+    safety: SafetyConfig = None  # 安全和预测评估配置
 
     # 系统配置
     random_seed: int = 2025
@@ -295,7 +341,9 @@ class GlobalConfig:
             self.agent_trajectory = AgentTrajectoryConfig()
         if self.carla is None:
             self.carla = CarlaConfig()
-    
+        if self.safety is None:
+            self.safety = SafetyConfig()
+
     def update_dt(self, new_dt: float):
         """更新时间步长并保持其他参数一致性"""
         old_dt = self.time.dt

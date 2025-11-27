@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 import math
 
@@ -530,6 +530,94 @@ class OptimizedMultiTimestepSpatialDirichletBank:
             'agent_alphas': agent_alphas_serialized,
             'agent_reachable_sets': agent_reachable_sets_serialized
         }
+
+    def sample_and_aggregate(
+        self,
+        agent_id: int,
+        timestep: int,
+        n_samples: int = 100
+    ) -> Tuple[List[int], np.ndarray]:
+        """采样并叠加多个transition分布
+
+        从Dirichlet后验采样多次，然后叠加求平均，得到aggregated probability distribution。
+
+        Args:
+            agent_id: Agent ID
+            timestep: Timestep (1-indexed)
+            n_samples: 采样数量
+
+        Returns:
+            reachable_cells: List of cell indices in reachable set
+            aggregated_prob: 叠加后的概率分布（已归一化）
+        """
+        if agent_id not in self.agent_alphas:
+            return [], np.array([])
+
+        if timestep not in self.agent_alphas[agent_id]:
+            return [], np.array([])
+
+        alpha = self.agent_alphas[agent_id][timestep]
+        reachable_cells = self.agent_reachable_sets[agent_id][timestep]
+
+        # 从Dirichlet后验采样
+        samples = np.random.dirichlet(alpha, size=n_samples)
+
+        # 叠加（求平均）
+        aggregated_prob = np.mean(samples, axis=0)
+
+        # 归一化（确保sum=1，虽然理论上已经是1）
+        prob_sum = np.sum(aggregated_prob)
+        if prob_sum > 0:
+            aggregated_prob = aggregated_prob / prob_sum
+
+        return reachable_cells, aggregated_prob
+
+    def get_confidence_set_from_samples(
+        self,
+        agent_id: int,
+        timestep: int,
+        confidence_level: float = 0.95,
+        n_samples: int = 100
+    ) -> List[int]:
+        """基于采样叠加计算confidence set
+
+        算法流程：
+        1. 从Dirichlet后验采样n_samples次
+        2. 叠加所有采样得到aggregated probability
+        3. 按概率降序选择cells，累积概率达到confidence_level时停止
+
+        Args:
+            agent_id: Agent ID
+            timestep: Timestep (1-indexed)
+            confidence_level: 置信水平（默认95%）
+            n_samples: 采样数量
+
+        Returns:
+            confidence_set: 包含前X%概率质量的cell indices列表
+        """
+        reachable_cells, aggregated_prob = self.sample_and_aggregate(
+            agent_id, timestep, n_samples
+        )
+
+        if len(reachable_cells) == 0:
+            return []
+
+        # 按概率降序排序
+        sorted_indices = np.argsort(aggregated_prob)[::-1]
+
+        # 累积到达confidence_level
+        confidence_set = []
+        cumulative_prob = 0.0
+
+        for idx in sorted_indices:
+            cell_id = reachable_cells[idx]
+            confidence_set.append(cell_id)
+            cumulative_prob += aggregated_prob[idx]
+
+            if cumulative_prob >= confidence_level:
+                break
+
+        return confidence_set
 
     @staticmethod
     def from_dict(data: Dict) -> 'OptimizedMultiTimestepSpatialDirichletBank':

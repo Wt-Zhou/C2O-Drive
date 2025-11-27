@@ -648,6 +648,181 @@ def parse_arguments():
     return parser.parse_args()
 
 
+def save_statistics_json(
+    statistics: Dict[str, List],
+    safety_events: Dict[str, List[int]],
+    save_dir: str
+):
+    """保存统计数据为JSON文件
+
+    Args:
+        statistics: {'coverage': [...], 'coverage_by_timestep': [...], 'returns': [...]}
+        safety_events: {'hard_collisions': [...], 'near_misses': [...]}
+        save_dir: 保存目录
+    """
+    import json
+    from pathlib import Path
+
+    save_path = Path(save_dir) / "episode_statistics.json"
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 计算综合统计
+    data = {
+        'per_episode': {
+            'coverage': statistics['coverage'],
+            'returns': statistics['returns'],
+            'hard_collisions': safety_events['hard_collisions'],
+            'near_misses': safety_events['near_misses'],
+        },
+        'summary': {
+            'mean_coverage': float(np.mean(statistics['coverage'])) if statistics['coverage'] else 0.0,
+            'std_coverage': float(np.std(statistics['coverage'])) if statistics['coverage'] else 0.0,
+            'mean_return': float(np.mean(statistics['returns'])) if statistics['returns'] else 0.0,
+            'std_return': float(np.std(statistics['returns'])) if statistics['returns'] else 0.0,
+            'total_episodes': len(statistics['returns']),
+            'total_hard_collisions': sum(safety_events['hard_collisions']),
+            'total_near_misses': sum(safety_events['near_misses']),
+            'hard_collision_rate': float(np.mean(safety_events['hard_collisions'])) if safety_events['hard_collisions'] else 0.0,
+            'near_miss_rate': float(np.mean(safety_events['near_misses'])) if safety_events['near_misses'] else 0.0,
+        }
+    }
+
+    with open(save_path, 'w') as f:
+        json.dump(data, f, indent=2)
+
+    print(f"  ✓ JSON统计已保存: {save_path}")
+
+
+def plot_statistics(
+    statistics: Dict[str, List],
+    safety_events: Dict[str, List[int]],
+    save_dir: str
+):
+    """绘制统计图表（每个指标单独的文件）
+
+    Args:
+        statistics: {'coverage': [...], 'coverage_by_timestep': [...], 'returns': [...]}
+        safety_events: {'hard_collisions': [...], 'near_misses': [...]}
+        save_dir: 保存目录
+    """
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+
+    if not statistics['coverage'] or not statistics['returns']:
+        print("  警告: 没有统计数据可供绘制")
+        return
+
+    save_path = Path(save_dir)
+    save_path.mkdir(parents=True, exist_ok=True)
+
+    episodes = list(range(1, len(statistics['coverage']) + 1))
+
+    # === 图1: Confidence Set Coverage ===
+    fig1, ax1 = plt.subplots(figsize=(12, 6))
+
+    ax1.plot(episodes, statistics['coverage'], 'b-o', linewidth=2, markersize=4, label='Coverage')
+    ax1.set_xlabel('Episode', fontsize=13)
+    ax1.set_ylabel('Coverage Rate', fontsize=13)
+    ax1.set_title('Confidence Set Coverage over Episodes', fontsize=15, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    ax1.set_ylim(0, 1.05)
+
+    # 添加平均线
+    mean_coverage = np.mean(statistics['coverage'])
+    ax1.axhline(y=mean_coverage, color='r', linestyle='--', linewidth=2,
+                label=f'Mean: {mean_coverage:.3f}')
+    ax1.legend(fontsize=11)
+
+    plt.tight_layout()
+    coverage_path = save_path / "coverage.png"
+    plt.savefig(coverage_path, dpi=150, bbox_inches='tight')
+    print(f"  ✓ Coverage图表已保存: {coverage_path}")
+    plt.close(fig1)
+
+    # === 图2: Episode Return ===
+    fig2, ax2 = plt.subplots(figsize=(12, 6))
+
+    ax2.plot(episodes, statistics['returns'], 'g-o', linewidth=2, markersize=4, label='Return')
+    ax2.set_xlabel('Episode', fontsize=13)
+    ax2.set_ylabel('Return', fontsize=13)
+    ax2.set_title('Ego Vehicle Return over Episodes', fontsize=15, fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+
+    # 添加平均线
+    mean_return = np.mean(statistics['returns'])
+    ax2.axhline(y=mean_return, color='r', linestyle='--', linewidth=2,
+                label=f'Mean: {mean_return:.2f}')
+    ax2.legend(fontsize=11)
+
+    plt.tight_layout()
+    return_path = save_path / "return.png"
+    plt.savefig(return_path, dpi=150, bbox_inches='tight')
+    print(f"  ✓ Return图表已保存: {return_path}")
+    plt.close(fig2)
+
+    # === 图3: Safety Events (Hard Collisions & Near Misses) ===
+    fig3, ax3 = plt.subplots(figsize=(12, 6))
+
+    # Plot hard collisions
+    ax3.plot(episodes, safety_events['hard_collisions'], 'r-s', linewidth=2, markersize=6,
+             label=f"Hard Collisions (Total: {sum(safety_events['hard_collisions'])})")
+    # Plot near misses
+    ax3.plot(episodes, safety_events['near_misses'], 'orange', marker='^', linewidth=2, markersize=6,
+             label=f"Near Misses (Total: {sum(safety_events['near_misses'])})")
+
+    ax3.set_xlabel('Episode', fontsize=13)
+    ax3.set_ylabel('Event Occurred (0 or 1)', fontsize=13)
+    ax3.set_title('Safety Events over Episodes', fontsize=15, fontweight='bold')
+    ax3.grid(True, alpha=0.3)
+    ax3.set_ylim(-0.1, 1.1)
+    ax3.legend(fontsize=11)
+
+    plt.tight_layout()
+    safety_path = save_path / "safety_events.png"
+    plt.savefig(safety_path, dpi=150, bbox_inches='tight')
+    print(f"  ✓ Safety Events图表已保存: {safety_path}")
+    plt.close(fig3)
+
+    # === 图4: Coverage by Timestep/Horizon ===
+    if statistics['coverage_by_timestep'] and len(statistics['coverage_by_timestep']) > 0:
+        fig4, ax4 = plt.subplots(figsize=(12, 6))
+
+        # Aggregate coverage across all episodes for each timestep
+        # Find max timestep length
+        max_timesteps = max(len(cov) for cov in statistics['coverage_by_timestep'] if cov)
+
+        # Initialize aggregation arrays
+        timestep_coverage_sum = np.zeros(max_timesteps)
+        timestep_count = np.zeros(max_timesteps)
+
+        for episode_coverage in statistics['coverage_by_timestep']:
+            for t, cov in enumerate(episode_coverage):
+                timestep_coverage_sum[t] += cov
+                timestep_count[t] += 1
+
+        # Calculate average coverage for each timestep
+        avg_coverage_by_timestep = []
+        for t in range(max_timesteps):
+            if timestep_count[t] > 0:
+                avg_coverage_by_timestep.append(timestep_coverage_sum[t] / timestep_count[t])
+            else:
+                avg_coverage_by_timestep.append(0.0)
+
+        timesteps = list(range(1, max_timesteps + 1))
+        ax4.plot(timesteps, avg_coverage_by_timestep, 'b-o', linewidth=2, markersize=5)
+        ax4.set_xlabel('Prediction Horizon (timestep)', fontsize=13)
+        ax4.set_ylabel('Average Coverage Rate', fontsize=13)
+        ax4.set_title('Confidence Set Coverage by Prediction Horizon', fontsize=15, fontweight='bold')
+        ax4.grid(True, alpha=0.3)
+        ax4.set_ylim(0, 1.05)
+
+        plt.tight_layout()
+        coverage_horizon_path = save_path / "coverage_by_horizon.png"
+        plt.savefig(coverage_horizon_path, dpi=150, bbox_inches='tight')
+        print(f"  ✓ Coverage by Horizon图表已保存: {coverage_horizon_path}")
+        plt.close(fig4)
+
+
 def main():
     """主函数"""
     args = parse_arguments()
@@ -813,6 +988,13 @@ def main():
         if summary_gif:
             print(f"  ✓ 汇总 GIF: {summary_gif}")
         global_visualizer.generate_final_plots()
+
+    # 保存episode统计数据
+    print(f"\n保存Episode统计数据...")
+    statistics = planner.get_episode_statistics()
+    safety_events = planner.get_safety_events()
+    save_statistics_json(statistics, safety_events, args.output_dir)
+    plot_statistics(statistics, safety_events, args.output_dir)
 
     # 清理
     print(f"\n清理资源...")

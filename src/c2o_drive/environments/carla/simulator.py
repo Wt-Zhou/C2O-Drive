@@ -363,22 +363,30 @@ class CarlaSimulator:
             yaw_rad=math.radians(ego_rot.yaw)
         )
 
-        # 获取环境车辆状态
+        # 获取环境车辆状态，同时清理失效的actor引用
         agents = []
-        for i, vehicle in enumerate(self.env_vehicles):
-            if vehicle.is_alive:
-                v_loc = vehicle.get_location()
-                v_vel = vehicle.get_velocity()
-                v_rot = vehicle.get_transform().rotation
+        valid_vehicles = []
 
-                agent_state = AgentState(
-                    agent_id=f"vehicle-{i+1}",
-                    position_m=(v_loc.x, v_loc.y),
-                    velocity_mps=(v_vel.x, v_vel.y),
-                    heading_rad=math.radians(v_rot.yaw),
-                    agent_type=AgentType.VEHICLE
-                )
-                agents.append(agent_state)
+        for vehicle in self.env_vehicles:
+            if not vehicle.is_alive:
+                continue  # 跳过已失效的vehicle，不添加到valid_vehicles
+
+            v_loc = vehicle.get_location()
+            v_vel = vehicle.get_velocity()
+            v_rot = vehicle.get_transform().rotation
+
+            agent_state = AgentState(
+                agent_id=f"vehicle-{vehicle.id}",  # 使用CARLA actor ID确保唯一性
+                position_m=(v_loc.x, v_loc.y),
+                velocity_mps=(v_vel.x, v_vel.y),
+                heading_rad=math.radians(v_rot.yaw),
+                agent_type=AgentType.VEHICLE
+            )
+            agents.append(agent_state)
+            valid_vehicles.append(vehicle)  # 只保留有效的vehicle
+
+        # 更新env_vehicles列表，移除失效的引用
+        self.env_vehicles = valid_vehicles
 
         return WorldState(
             time_s=self.current_time,
@@ -540,46 +548,44 @@ class CarlaSimulator:
 
     def cleanup(self):
         """清理所有车辆和传感器"""
-        # 1. 先销毁碰撞传感器
-        if self.ego_collision_sensor is not None:
-            try:
-                if self.ego_collision_sensor.is_alive:
-                    self.ego_collision_sensor.destroy()
-            except Exception:
-                pass
-            finally:
-                self.ego_collision_sensor = None
+        destroyed_ids = set()  # 记录已删除的actor ID，避免重复删除
 
-        # 2. 销毁自车（hero）
-        if self.ego_vehicle is not None:
-            try:
-                if self.ego_vehicle.is_alive:
-                    self.ego_vehicle.destroy()
-            except Exception:
-                pass
-            finally:
-                self.ego_vehicle = None
+        # 1. 销毁碰撞传感器
+        if self.ego_collision_sensor is not None and self.ego_collision_sensor.is_alive:
+            self.ego_collision_sensor.destroy()
+            destroyed_ids.add(self.ego_collision_sensor.id)
+        self.ego_collision_sensor = None
 
-        # 3. 销毁内部记录的环境车辆
-        for vehicle in list(self.env_vehicles):
-            try:
-                if vehicle.is_alive:
-                    vehicle.destroy()
-            except Exception:
-                pass
+        # 2. 销毁自车
+        if self.ego_vehicle is not None and self.ego_vehicle.is_alive:
+            self.ego_vehicle.destroy()
+            destroyed_ids.add(self.ego_vehicle.id)
+        self.ego_vehicle = None
+
+        # 3. 销毁env_vehicles列表中的车辆
+        for vehicle in self.env_vehicles:
+            if vehicle.is_alive:
+                vehicle.destroy()
+                destroyed_ids.add(vehicle.id)
         self.env_vehicles = []
 
-        # 4. 彻底清理场景中全部非 hero 车辆，确保无残留
+        # 4. 清理残留车辆（添加异常保护，确保单个失败不影响整体清理）
         try:
             actor_list = self.world.get_actors().filter("*vehicle*")
             for actor in actor_list:
+                # 跳过已删除的actor
+                if actor.id in destroyed_ids:
+                    continue
                 try:
+                    # 只删除非hero车辆
                     role = actor.attributes.get('role_name', '')
                     if role != "hero" and actor.is_alive:
                         actor.destroy()
                 except Exception:
+                    # 单个actor删除失败不影响其他actor的清理
                     pass
         except Exception:
+            # get_actors失败不影响前面已完成的清理
             pass
 
     def set_vehicle_trajectory(self, vehicle_index: int, trajectory: List[Tuple[float, float]],

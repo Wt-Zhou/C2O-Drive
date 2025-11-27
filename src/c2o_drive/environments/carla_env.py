@@ -107,11 +107,8 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
 
         # 确保连接
         self._ensure_connected()
-        if self.simulator is not None:
-            # 显式清理可能残留的自车/传感器，确保新的 spawn 不受影响
-            self.simulator.cleanup()
 
-        # 创建场景
+        # 创建场景（create_scenario内部会自动调用cleanup）
         options = options or {}
         scenario_config = options.get('scenario_config', {})
         scenario_def = scenario_config.get('scenario')
@@ -130,10 +127,14 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
             ]
             autopilot = scenario_def.autopilot
         else:
-            default_spawn = CarlaScenarioLibrary.spawn_to_transform((5.5, -70.0, 0.5, -90.0))
-            ego_spawn = default_spawn
-            agent_spawns = []
-            autopilot = False
+            # 使用默认 scenario 而不是空场景
+            scenario_def = CarlaScenarioLibrary.get_scenario('s4_wrong_way')
+            ego_spawn = CarlaScenarioLibrary.spawn_to_transform(scenario_def.ego_spawn)
+            agent_spawns = [
+                CarlaScenarioLibrary.spawn_to_transform(spawn)
+                for spawn in scenario_def.agent_spawns
+            ]
+            autopilot = scenario_def.autopilot
 
         # 使用simulator创建场景
         self._current_state = self.simulator.create_scenario(
