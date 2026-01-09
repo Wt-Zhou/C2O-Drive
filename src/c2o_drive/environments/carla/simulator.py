@@ -577,9 +577,8 @@ class CarlaSimulator:
                 if actor.id in destroyed_ids:
                     continue
                 try:
-                    # 只删除非hero车辆
-                    role = actor.attributes.get('role_name', '')
-                    if role != "hero" and actor.is_alive:
+                    # 删除所有车辆
+                    if actor.is_alive:
                         actor.destroy()
                 except Exception:
                     # 单个actor删除失败不影响其他actor的清理

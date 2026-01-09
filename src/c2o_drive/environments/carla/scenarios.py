@@ -159,6 +159,18 @@ class CarlaScenarioLibrary:
             "source": "user_defined",
             "agent_speed_range_mps": (5.0, 10.0),
             "cut_in_direction": "right",  # 标记cut-in方向
+            "agent_trajectories": {
+                0: [  # 第一辆车（cut-in车辆）的轨迹
+                    (10.5, -80.0),   # 起始位置（右侧后方）
+                    (10.5, -85.0),   # 向前行驶
+                    (9.5, -90.0),    # 开始切入
+                    (8.0, -95.0),    # 继续切入
+                    (6.5, -100.0),   # 接近自车道
+                    (5.5, -105.0),   # 完成切入到自车道
+                    (5.5, -110.0),   # 在自车道继续行驶
+                    (5.5, -115.0),   # 继续前进
+                ]
+            }
         }
 
         return ScenarioDefinition(

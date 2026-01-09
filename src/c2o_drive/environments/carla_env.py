@@ -148,6 +148,11 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
         self._episode_trajectory = []  # 清空轨迹记录
         self._previous_action = None
 
+        # 存储预定义的agent轨迹（如果有）
+        self._agent_trajectories = None
+        if scenario_def is not None and scenario_def.metadata is not None:
+            self._agent_trajectories = scenario_def.metadata.get('agent_trajectories')
+
         reference_path = options.get('reference_path')
         if reference_path is None and scenario_def is not None:
             reference_path = CarlaScenarioLibrary.get_reference_path(
@@ -180,6 +185,47 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
         # 执行动作，考虑CARLA内部更小的时间步
         next_state = self._current_state
         collision_occurred = False
+
+        # 如果有预定义的agent轨迹，执行它们
+        if self._agent_trajectories is not None:
+            for agent_idx, trajectory in self._agent_trajectories.items():
+                if agent_idx < len(self.simulator.env_vehicles) and self._step_count < len(trajectory) - 1:
+                    # 获取当前和下一个位置
+                    current_pos = trajectory[self._step_count]
+                    next_pos = trajectory[self._step_count + 1]
+
+                    # 为该车辆设置目标速度向量
+                    vehicle = self.simulator.env_vehicles[agent_idx]
+                    dx = next_pos[0] - current_pos[0]
+                    dy = next_pos[1] - current_pos[1]
+
+                    # 计算速度（基于时间步长）
+                    vx = dx / self.dt
+                    vy = dy / self.dt
+
+                    # 计算朝向
+                    import math
+                    if abs(dx) > 0.01 or abs(dy) > 0.01:
+                        target_yaw = math.degrees(math.atan2(dy, dx))
+
+                        # 设置朝向和速度
+                        try:
+                            from carla import Vector3D, Transform, Rotation
+                            # 更新朝向
+                            current_transform = vehicle.get_transform()
+                            new_rotation = Rotation(
+                                pitch=current_transform.rotation.pitch,
+                                yaw=target_yaw,
+                                roll=current_transform.rotation.roll
+                            )
+                            vehicle.set_transform(Transform(current_transform.location, new_rotation))
+
+                            # 设置速度
+                            velocity_vector = Vector3D(x=vx, y=vy, z=0)
+                            vehicle.set_target_velocity(velocity_vector)
+                        except Exception as e:
+                            pass
+
         for _ in range(self._substeps):
             next_state = self.simulator.step(action)
             if self._check_collision(next_state):
