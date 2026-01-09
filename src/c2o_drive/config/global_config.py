@@ -33,8 +33,8 @@ class TimeConfig:
 @dataclass 
 class SamplingConfig:
     """采样相关配置"""
-    reachable_set_samples: int = 3000     # 可达集采样数量
-    reachable_set_samples_legacy: int = 3000  # 兼容旧版本的采样数量
+    reachable_set_samples: int = 5000     # 可达集采样数量
+    reachable_set_samples_legacy: int = 5000  # 兼容旧版本的采样数量
     q_value_samples: int = 50           # Q值计算采样数量
     trajectory_samples: int = 50        # 轨迹生成采样数量
 
@@ -112,6 +112,11 @@ class RewardConfig:
 
     # 中心线偏移参数
     centerline_offset_penalty_weight: float = 0 # 中心线偏移惩罚权重
+    max_deviation: float = 2.0          # 最大可接受偏移（m）
+
+    # 时间相关参数
+    time_penalty: float = -0.1          # 每时间步惩罚（鼓励快速完成任务）
+    gamma: float = 0.95                 # 时序折扣因子（用于C2OSR碰撞概率计算）
 
 
 @dataclass
@@ -202,6 +207,40 @@ class BaselineConfig:
     sac_checkpoint_dir: str = "checkpoints/sac_carla"  # 检查点保存目录
     sac_log_dir: str = "logs/sac_carla"   # TensorBoard日志目录
 
+    # PPO配置
+    ppo_enabled: bool = False
+    ppo_seed: int = 0
+
+    # PPO网络配置
+    ppo_state_dim: int = 128              # 状态特征维度
+    ppo_hidden_dims: tuple = (256, 256)   # 隐藏层维度
+
+    # PPO训练超参数
+    ppo_learning_rate: float = 3e-4       # 学习率
+    ppo_gamma: float = 0.99               # 折扣因子
+    ppo_gae_lambda: float = 0.95          # GAE lambda参数
+    ppo_clip_epsilon: float = 0.2         # PPO clipping参数
+    ppo_clip_grad_norm: float = 0.5       # 梯度裁剪范数
+    ppo_value_loss_coef: float = 0.5      # Value损失系数
+    ppo_entropy_coef: float = 0.01        # 熵正则化系数
+
+    # PPO训练配置
+    ppo_n_epochs: int = 10                # PPO更新轮数
+    ppo_batch_size: int = 64              # Mini-batch大小
+    ppo_buffer_size: int = 2048           # Rollout buffer容量
+    ppo_num_episodes: int = 1000          # 总训练episodes
+    ppo_max_steps_per_episode: int = 100  # 每个episode最大步数
+    ppo_use_gae: bool = True              # 使用GAE
+    ppo_normalize_advantage: bool = True  # 归一化advantage
+    ppo_device: str = "cpu"               # 训练设备 (cuda/cpu)
+
+    # PPO保存与评估配置
+    ppo_save_interval: int = 50           # 模型保存间隔（episodes）
+    ppo_eval_interval: int = 10           # 评估间隔（episodes）
+    ppo_eval_episodes: int = 5            # 每次评估的episodes数
+    ppo_checkpoint_dir: str = "checkpoints/ppo_carla"  # 检查点保存目录
+    ppo_log_dir: str = "logs/ppo_carla"   # TensorBoard日志目录
+
     # Offline CQL配置
     offline_cql_enabled: bool = False
     offline_cql_dataset: str = ""
@@ -214,15 +253,29 @@ class BaselineConfig:
 @dataclass
 class LatticeConfig:
     """Lattice轨迹配置（基于reference path的采样）"""
-    num_trajectories: int = 25      # 目标轨迹数量
     lateral_offsets: list = None    # 横向偏移量（米）
     speed_variations: list = None   # 速度变化（m/s）
+    dt: float = 1.0                 # 时间步长（秒）
+    horizon: int = 10               # 预测时间步数
 
     def __post_init__(self):
         if self.lateral_offsets is None:
-            self.lateral_offsets = [-3.0, -2.0, 0.0, 2.0, 3.0]  # 统一为与algorithm config一致
+            self.lateral_offsets = [-5.0, -2.5, 0.0, 2.5, 5.0]  # C2OSR标准配置
         if self.speed_variations is None:
-            self.speed_variations = [4.0]  # 统一为与algorithm config一致
+            self.speed_variations = [1.0, 3.0,6.0]  # C2OSR标准配置
+
+    @property
+    def num_trajectories(self) -> int:
+        """动态计算轨迹数量（即action_dim）
+
+        Returns:
+            int: len(lateral_offsets) × len(speed_variations)
+
+        Examples:
+            - lateral_offsets=[-3,-2,0,2,3], speed_variations=[4.0] → num_trajectories=5
+            - lateral_offsets=[-3,-2,0,2,3], speed_variations=[4,6,8] → num_trajectories=15
+        """
+        return len(self.lateral_offsets) * len(self.speed_variations)
 
 
 @dataclass
@@ -281,7 +334,12 @@ class SafetyConfig:
 
     # Confidence set configuration
     confidence_level: float = 0.95           # Confidence set置信水平（95%）
-    confidence_set_samples: int = 100        # 采样数量（用于叠加计算confidence set）
+    confidence_set_samples: int = 100        # 基础采样数量（用于叠加计算confidence set）
+
+    # 动态采样配置
+    adaptive_sampling: bool = True           # 是否启用动态采样
+    min_samples_per_cell: int = 5            # 每个cell最少采样次数
+    max_samples: int = 5000                  # 最大采样数上限（防止计算爆炸）
 
 
 @dataclass

@@ -1,3 +1,3 @@
 已知问题
 1. c2o drive算法和env维护了两套reward，当前c2o drive使用自己定义的reward计算Q值，后续在CARLA里可以重新计算
-2. 
+2. 由于reachable set在timestep比较大的时候，无法完全覆盖，导致在timestep比较大的时候，dirichlet分布和transition计算都并不准确，呈现空值，现在已经通过

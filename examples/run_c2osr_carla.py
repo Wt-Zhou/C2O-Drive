@@ -842,10 +842,27 @@ def main():
             scenario = get_scenario(scenario_name)
             print(f"\n{scenario_name}:")
             print(f"  描述: {scenario.description}")
+            print(f"  地图: {scenario.town}")
             print(f"  难度: {scenario.difficulty}")
             print(f"  路径模式: {scenario.reference_path_mode}")
         print("\n")
         return
+
+    scenario_def_for_planner = None
+    grid_center = None
+    actual_town = args.town  # 默认使用命令行参数
+
+    if args.scenario:
+        try:
+            scenario_def_for_planner = get_scenario(args.scenario)
+            grid_center = (
+                float(scenario_def_for_planner.ego_spawn[0]),
+                float(scenario_def_for_planner.ego_spawn[1]),
+            )
+            # 使用场景指定的地图，覆盖命令行参数
+            actual_town = scenario_def_for_planner.town
+        except Exception:
+            grid_center = None
 
     # 打印配置
     print(f"\n{'='*70}")
@@ -853,7 +870,7 @@ def main():
     print(f"{'='*70}")
     print(f"\nCARLA配置:")
     print(f"  服务器: {args.host}:{args.port}")
-    print(f"  地图: {args.town}")
+    print(f"  地图: {actual_town}" + (f" (场景指定)" if args.scenario else ""))
     print(f"  场景: {args.scenario or '默认'}")
     print(f"  车辆数: {args.num_vehicles}")
     print(f"  行人数: {args.num_pedestrians}")
@@ -866,18 +883,6 @@ def main():
     print(f"  配置预设: {args.config_preset}")
     print(f"  网格大小: {args.grid_size}m")
     print(f"  种子: {args.seed}")
-
-    scenario_def_for_planner = None
-    grid_center = None
-    if args.scenario:
-        try:
-            scenario_def_for_planner = get_scenario(args.scenario)
-            grid_center = (
-                float(scenario_def_for_planner.ego_spawn[0]),
-                float(scenario_def_for_planner.ego_spawn[1]),
-            )
-        except Exception:
-            grid_center = None
 
     # 创建输出目录
     output_dir = Path(args.output_dir)
@@ -898,7 +903,7 @@ def main():
         env = CarlaEnvironment(
             host=args.host,
             port=args.port,
-            town=args.town,
+            town=actual_town,  # 使用场景指定的地图
             dt=args.dt,
             max_episode_steps=args.max_steps,
             num_vehicles=args.num_vehicles,

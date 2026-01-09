@@ -1,8 +1,7 @@
-"""CARLA 场景库（精简版）
+"""CARLA 场景库
 
-当前仅保留真实项目中需要的 S4 Wrong-way vehicle 场景，该场景来源于
-``bak/TestScenario_Town03_Waymo_long_tail.py``，用于模拟对向逆行车辆进入
-自车车道的长尾风险。"""
+包含 S1-S5 场景定义，用于 C2OSR 算法测试。
+各场景的具体坐标和参数需根据实际地图配置。"""
 
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict, Any
@@ -23,6 +22,7 @@ class ScenarioDefinition:
 
     name: str
     description: str
+    town: str  # CARLA地图名称（Town01-Town10）
     ego_spawn: Tuple[float, float, float, float]  # (x, y, z, yaw)
     agent_spawns: List[Tuple[float, float, float, float]]  # List of (x, y, z, yaw)
     reference_path_mode: str = "straight"  # straight, curve, s_curve
@@ -32,11 +32,15 @@ class ScenarioDefinition:
 
 
 class CarlaScenarioLibrary:
-    """CARLA 场景库（仅包含 S4 Wrong-way vehicle）"""
+    """CARLA 场景库（包含 S1-S5 场景）"""
 
     _SCENARIOS: Dict[str, ScenarioDefinition] = {}
     _ALIASES: Dict[str, str] = {
-        "s4": "s4_wrong_way",  # 简化别名
+        "s1": "s1_scenario",
+        "s2": "s2_scenario",
+        "s3": "s3_scenario",
+        "s4": "s4_pedestrian_crossing",
+        "s5": "s5_scenario",
     }
 
     @staticmethod
@@ -58,7 +62,11 @@ class CarlaScenarioLibrary:
 
         if not CarlaScenarioLibrary._SCENARIOS:
             CarlaScenarioLibrary._SCENARIOS = {
-                "s4_wrong_way": CarlaScenarioLibrary.wrong_way_vehicle(),
+                "s1_scenario": CarlaScenarioLibrary.s1_scenario(),
+                "s2_scenario": CarlaScenarioLibrary.s2_scenario(),
+                "s3_scenario": CarlaScenarioLibrary.s3_scenario(),
+                "s4_pedestrian_crossing": CarlaScenarioLibrary.s4_pedestrian_crossing(),
+                "s5_scenario": CarlaScenarioLibrary.s5_scenario(),
             }
 
         if name not in CarlaScenarioLibrary._SCENARIOS:
@@ -74,7 +82,7 @@ class CarlaScenarioLibrary:
     def list_scenarios() -> List[str]:
         """列出所有可用场景"""
         if not CarlaScenarioLibrary._SCENARIOS:
-            CarlaScenarioLibrary.get_scenario("s4_wrong_way")
+            CarlaScenarioLibrary.get_scenario("s1_scenario")
         return list(CarlaScenarioLibrary._SCENARIOS.keys())
 
     @staticmethod
@@ -88,33 +96,211 @@ class CarlaScenarioLibrary:
         return Transform(Location(x=x, y=y, z=z), Rotation(yaw=yaw))
 
     @staticmethod
-    def wrong_way_vehicle() -> ScenarioDefinition:
-        """S4 Wrong-way vehicle 场景定义。
+    def s1_scenario() -> ScenarioDefinition:
+        """S1: 环境车逆行场景
 
-        - 参考 ``TestScenario_Town03_Waymo_long_tail`` 的坐标系；
-        - 自车沿 Town03 东向车道 (-90°) 南行；
-        - 对向车辆在 (12.8, -123.0) 处以约 100° 角逆行切入该车道；
-        - metadata 提供速度/入射角范围，便于上层随机化。
+        场景描述：对向逆行车辆切入本车道
+
+        参数说明：
+        - 自车沿 Town03 东向车道 (-90°) 南行
+        - 对向车辆在 (12.8, -123.0) 处以约 100° 角逆行切入该车道
+        - metadata 提供速度/入射角范围，便于上层随机化
         """
-
         ego_spawn = (5.5, -90.0, 0.5, -90.0)
-        wrong_way_spawn = (12.8, -123.0, 1.0, 100.0)
+        wrong_way_spawn = (12.8, -123.0, 1.0, 125.0)
 
         metadata = {
             "source": "TestScenario_Town03_Waymo_long_tail.py",
-            "agent_speed_range_mps": (3.0, 8.0),   # 初速度 3~8 m/s
+            "agent_speed_range_mps": (5.0, 10.0),   # 初速度 3~8 m/s
             "entry_angle_range_deg": (-20.0, 20.0),  # 以 100° 为中心的偏差
-            "recommended_town": "Town03",
         }
 
         return ScenarioDefinition(
-            name="s4_wrong_way",
-            description="Wrong-way vehicle: 对向逆行车辆切入本车道",
+            name="s1_scenario",
+            description="环境车逆行场景",
+            town="Town03",
             ego_spawn=ego_spawn,
             agent_spawns=[wrong_way_spawn],
             reference_path_mode="straight",
             autopilot=False,
             difficulty="hard",
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def s2_scenario() -> ScenarioDefinition:
+        """S2: 右侧车辆变道切入场景
+
+        场景描述：环境车从右侧自行车道/非机动车道变道切入自车前方
+
+        参数说明：
+        - 自车沿 Town03 东向车道南行（与s1相同位置）
+        - Cut-in车辆在右侧后方，会切入自车车道
+        - 包含1-2辆背景车辆增加场景复杂度
+
+        坐标系统：
+        - X轴正方向：东侧（自车右侧）
+        - Y轴负方向：南侧（自车前方）
+        - Yaw=-90°：朝南行驶
+        """
+        # 自车位置（与s1相同）
+        ego_spawn = (5.5, -90.0, 0.5, -90.0)
+
+        # Agent 1: 右侧后方的cut-in车辆
+        cut_in_vehicle = (10.5, -80.0, 0.5, -90.0)  # 右侧5米，后方10米
+
+        # Agent 2: 前方背景车辆
+        front_vehicle = (5.5, -110.0, 0.5, -90.0)   # 前方20米
+
+        # Agent 3: 后方背景车辆
+        rear_vehicle = (5.5, -60.0, 0.5, -90.0)     # 后方30米
+
+        metadata = {
+            "source": "user_defined",
+            "agent_speed_range_mps": (5.0, 10.0),
+            "cut_in_direction": "right",  # 标记cut-in方向
+        }
+
+        return ScenarioDefinition(
+            name="s2_scenario",
+            description="右侧车辆变道切入场景",
+            town="Town03",
+            ego_spawn=ego_spawn,
+            agent_spawns=[cut_in_vehicle, front_vehicle, rear_vehicle],
+            reference_path_mode="straight",
+            autopilot=False,
+            difficulty="medium",
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def s3_scenario() -> ScenarioDefinition:
+        """S3: 右侧自行车波浪行驶场景
+
+        场景描述：自车驾驶中，右侧自行车道有一辆自行车进行波浪线行驶
+
+        参数说明：
+        - 自车沿 Town03 东向车道南行（与s1/s2相同位置）
+        - 自行车在右前方自行车道，进行波浪线（左右摆动）行驶
+        - 包含1-2辆背景车辆模拟正常交通流
+
+        坐标系统：
+        - X轴正方向：东侧（自车右侧）
+        - Y轴负方向：南侧（自车前方）
+        - Yaw=-90°：朝南行驶
+
+        注意：
+        - 自行车的波浪运动需要在 simulator 控制层实现
+        - spawn 仅设置初始位置，运动模式通过 metadata 标记
+        """
+        # 自车位置（与s1/s2相同）
+        ego_spawn = (5.5, -90.0, 0.5, -90.0)
+
+        # Agent 1: 右前方波浪行驶的自行车
+        bicycle = (9.5, -105.0, 0.5, -90.0)  # 右侧4米，前方15米
+
+        # Agent 2: 前方背景车辆
+        front_vehicle = (5.5, -120.0, 0.5, -90.0)  # 前方30米
+
+        # Agent 3: 后方背景车辆
+        rear_vehicle = (5.5, -70.0, 0.5, -90.0)    # 后方20米
+
+        metadata = {
+            "source": "user_defined",
+            "agent_speed_range_mps": (3.0, 6.0),  # 自行车速度较慢
+            "motion_pattern": "wave",  # 标记波浪运动模式
+            "wave_amplitude": 1.5,     # 波浪幅度（米）
+            "wave_frequency": 0.5,     # 波浪频率（Hz）
+        }
+
+        return ScenarioDefinition(
+            name="s3_scenario",
+            description="右侧自行车波浪行驶场景",
+            town="Town03",
+            ego_spawn=ego_spawn,
+            agent_spawns=[bicycle, front_vehicle, rear_vehicle],
+            reference_path_mode="straight",
+            autopilot=False,
+            difficulty="medium",
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def s4_pedestrian_crossing() -> ScenarioDefinition:
+        """S4: 行人横穿突然减速场景
+
+        场景描述：自车前进时，一个行人从左侧横穿马路，但突然减速并可能停在马路中间
+
+        参数说明：
+        - 自车沿 Town03 东向车道南行（与s1/s2/s3相同位置）
+        - 行人从左侧人行道横穿马路（从西向东）
+        - 行人在道路中间突然减速或停止
+
+        坐标系统：
+        - X轴正方向：东侧（自车右侧，行人横穿方向）
+        - Y轴负方向：南侧（自车前方）
+        - Yaw=0°：朝东（行人横穿方向）
+
+        注意：
+        - 行人的减速/停止行为需要在 simulator 控制层实现
+        - spawn 仅设置初始位置，运动模式通过 metadata 标记
+        """
+        # 自车位置（与s1/s2/s3相同）
+        ego_spawn = (5.5, -90.0, 0.5, -90.0)
+
+        # 行人：左侧人行道，准备横穿
+        pedestrian = (1.5, -110.0, 0.5, 0.0)  # 左侧4米，前方20米，朝东
+
+        metadata = {
+            "source": "user_defined",
+            "agent_speed_range_mps": (1.2, 1.5),  # 正常步行速度
+            "motion_pattern": "crossing_decelerate",  # 横穿减速模式
+            "deceleration_position_x": 5.5,  # 在道路中间减速（主车道位置）
+            "target_speed_after_decel": 0.0,  # 减速后速度（0=停止）
+            "deceleration_rate": 2.0,  # 减速度 m/s²
+        }
+
+        return ScenarioDefinition(
+            name="s4_pedestrian_crossing",
+            description="行人横穿突然减速场景",
+            town="Town03",
+            ego_spawn=ego_spawn,
+            agent_spawns=[pedestrian],
+            reference_path_mode="straight",
+            autopilot=False,
+            difficulty="high",  # 行人不可预测性高
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def s5_scenario() -> ScenarioDefinition:
+        """S5: [待填写场景名称]
+
+        场景描述：[在此填写一句话描述，例如：路口横向车辆闯红灯]
+
+        参数说明：
+        - 自车位置和朝向
+        - 环境车辆位置和行为
+        - TODO: 根据实际测试场景填写具体参数
+        """
+        # TODO: 修改为实际坐标
+        ego_spawn = (0.0, 0.0, 0.5, 0.0)
+        agent_spawn = (10.0, 0.0, 0.5, 0.0)
+
+        metadata = {
+            "source": "user_defined",
+            "agent_speed_range_mps": (3.0, 8.0),
+        }
+
+        return ScenarioDefinition(
+            name="s5_scenario",
+            description="[填写场景描述]",  # TODO: 修改为实际场景描述
+            town="Town03",  # TODO: 修改为实际地图
+            ego_spawn=ego_spawn,
+            agent_spawns=[agent_spawn],
+            reference_path_mode="straight",
+            autopilot=False,
+            difficulty="medium",
             metadata=metadata,
         )
 

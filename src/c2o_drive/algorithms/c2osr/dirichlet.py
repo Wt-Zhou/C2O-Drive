@@ -581,8 +581,10 @@ class OptimizedMultiTimestepSpatialDirichletBank:
     ) -> List[int]:
         """基于采样叠加计算confidence set
 
+        支持动态采样：根据可达集大小自动调整采样数量
+
         算法流程：
-        1. 从Dirichlet后验采样n_samples次
+        1. 从Dirichlet后验采样n_samples次（可能动态调整）
         2. 叠加所有采样得到aggregated probability
         3. 按概率降序选择cells，累积概率达到confidence_level时停止
 
@@ -590,13 +592,43 @@ class OptimizedMultiTimestepSpatialDirichletBank:
             agent_id: Agent ID
             timestep: Timestep (1-indexed)
             confidence_level: 置信水平（默认95%）
-            n_samples: 采样数量
+            n_samples: 基础采样数量
 
         Returns:
             confidence_set: 包含前X%概率质量的cell indices列表
         """
+        from c2o_drive.config import get_global_config
+        config = get_global_config()
+
+        # 获取可达集信息
+        if agent_id not in self.agent_reachable_sets:
+            return []
+        if timestep not in self.agent_reachable_sets[agent_id]:
+            return []
+
+        reachable_cells = self.agent_reachable_sets[agent_id][timestep]
+        reachable_set_size = len(reachable_cells)
+
+        # 动态调整采样数
+        if config.safety.adaptive_sampling:
+            # 计算所需采样数：确保每个cell至少被采样min_samples_per_cell次
+            required_samples = reachable_set_size * config.safety.min_samples_per_cell
+
+            # 取最大值（基础采样数 vs 要求采样数）
+            adjusted_samples = max(n_samples, required_samples)
+
+            # 应用上限保护
+            adjusted_samples = min(adjusted_samples, config.safety.max_samples)
+
+            # 使用调整后的采样数
+            actual_samples = adjusted_samples
+        else:
+            # 固定采样数模式
+            actual_samples = n_samples
+
+        # 执行采样和叠加
         reachable_cells, aggregated_prob = self.sample_and_aggregate(
-            agent_id, timestep, n_samples
+            agent_id, timestep, actual_samples
         )
 
         if len(reachable_cells) == 0:
@@ -618,6 +650,51 @@ class OptimizedMultiTimestepSpatialDirichletBank:
                 break
 
         return confidence_set
+
+    def get_sampling_info(
+        self,
+        agent_id: int,
+        timestep: int,
+        n_samples: int = 100
+    ) -> dict:
+        """获取采样信息用于调试
+
+        Args:
+            agent_id: Agent ID
+            timestep: Timestep (1-indexed)
+            n_samples: 基础采样数量
+
+        Returns:
+            dict: {
+                'reachable_set_size': int,
+                'base_samples': int,
+                'adjusted_samples': int,
+                'samples_per_cell': float
+            }
+        """
+        from c2o_drive.config import get_global_config
+        config = get_global_config()
+
+        if agent_id not in self.agent_reachable_sets:
+            return {}
+        if timestep not in self.agent_reachable_sets[agent_id]:
+            return {}
+
+        reachable_set_size = len(self.agent_reachable_sets[agent_id][timestep])
+
+        if config.safety.adaptive_sampling:
+            required_samples = reachable_set_size * config.safety.min_samples_per_cell
+            adjusted_samples = max(n_samples, required_samples)
+            adjusted_samples = min(adjusted_samples, config.safety.max_samples)
+        else:
+            adjusted_samples = n_samples
+
+        return {
+            'reachable_set_size': reachable_set_size,
+            'base_samples': n_samples,
+            'adjusted_samples': adjusted_samples,
+            'samples_per_cell': adjusted_samples / reachable_set_size if reachable_set_size > 0 else 0
+        }
 
     @staticmethod
     def from_dict(data: Dict) -> 'OptimizedMultiTimestepSpatialDirichletBank':

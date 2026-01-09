@@ -49,15 +49,25 @@ class LatticePlannerConfig:
     Attributes:
         lateral_offsets: List of lateral offset samples in meters
         speed_variations: List of target speed samples in m/s
-        num_trajectories: Target number of trajectories to generate
         horizon: Planning horizon in timesteps (None = read from global config)
         dt: Time step in seconds
+
+    Note:
+        num_trajectories is dynamically computed from len(lateral_offsets) × len(speed_variations)
     """
     lateral_offsets: List[float] = field(default_factory=lambda: [-3.0, -2.0, 0.0, 2.0, 3.0])
     speed_variations: List[float] = field(default_factory=lambda: [4.0])
-    num_trajectories: int = 25
     horizon: Optional[int] = None  # Read from global config if not specified
     dt: float = 1.0
+
+    @property
+    def num_trajectories(self) -> int:
+        """Dynamically compute number of trajectories.
+
+        Returns:
+            len(lateral_offsets) × len(speed_variations)
+        """
+        return len(self.lateral_offsets) * len(self.speed_variations)
 
     def __post_init__(self):
         """Load horizon from global config if not explicitly set."""
