@@ -137,10 +137,13 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
             autopilot = scenario_def.autopilot
 
         # 使用simulator创建场景
+        # 传递scenario的metadata以支持不同类型的agent（如自行车）
+        metadata = scenario_def.metadata if scenario_def is not None else None
         self._current_state = self.simulator.create_scenario(
             ego_spawn=ego_spawn,
             agent_spawns=agent_spawns,
             agent_autopilot=autopilot,
+            metadata=metadata,
         )
 
         self._step_count = 0
@@ -300,18 +303,32 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
         """检测是否发生碰撞
 
         优先使用CARLA碰撞传感器数据，辅以距离检测作为备份。
+        根据agent类型使用不同的碰撞阈值。
         """
         # 优先使用CARLA碰撞传感器
         if self.simulator and self.simulator.is_collision_occurred():
             return True
 
-        # 备份：简单距离检测（考虑车辆半径）
+        # 备份：简单距离检测（根据agent类型使用不同阈值）
         ego_pos = np.array(state.ego.position_m)
-        collision_threshold = 3.5  # 车辆半径约1.5-2m，安全距离3.5m
+
+        # 导入AgentType枚举
+        from c2o_drive.core.types import AgentType
 
         for agent in state.agents:
             agent_pos = np.array(agent.position_m)
             distance = np.linalg.norm(ego_pos - agent_pos)
+
+            # 根据agent类型设置不同的碰撞阈值
+            if agent.agent_type == AgentType.BICYCLE:
+                collision_threshold = 2.0  # 自行车：较小的碰撞距离
+            elif agent.agent_type == AgentType.PEDESTRIAN:
+                collision_threshold = 1.5  # 行人：最小的碰撞距离
+            elif agent.agent_type == AgentType.MOTORCYCLE:
+                collision_threshold = 2.5  # 摩托车：中等碰撞距离
+            else:  # VEHICLE
+                collision_threshold = 3.5  # 汽车：较大的碰撞距离
+
             if distance < collision_threshold:
                 return True
 

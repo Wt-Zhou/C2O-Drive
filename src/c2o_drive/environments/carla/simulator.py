@@ -9,7 +9,7 @@ import glob
 import os
 import sys
 import math
-from typing import List, Tuple, Optional, Dict, Union
+from typing import List, Tuple, Optional, Dict, Union, Any
 
 # CARLA路径设置 - 智能查找
 def _find_and_add_carla_egg():
@@ -242,7 +242,8 @@ class CarlaSimulator:
     def create_scenario(self,
                        ego_spawn: Transform,
                        agent_spawns: List[Transform] = None,
-                       agent_autopilot: bool = False) -> WorldState:
+                       agent_autopilot: bool = False,
+                       metadata: Dict[str, Any] = None) -> WorldState:
         """创建场景并返回初始WorldState
 
         Args:
@@ -285,14 +286,32 @@ class CarlaSimulator:
         self.ego_collision_sensor.listen(self._on_collision)
         self.ego_collision_occurred = False
 
-        # 生成环境车辆
+        # 生成环境车辆（包括行人）
         self.env_vehicles = []
         if agent_spawns:
             for i, spawn in enumerate(agent_spawns):
+                # 根据metadata选择正确的blueprint
+                is_walker = False
+                if metadata and 'agent_blueprints' in metadata and i < len(metadata['agent_blueprints']):
+                    blueprint_id = metadata['agent_blueprints'][i]
+                    if blueprint_id:
+                        if 'walker' in blueprint_id.lower():
+                            is_walker = True
+                        agent_bp = self.world.get_blueprint_library().find(blueprint_id)
+                    else:
+                        agent_bp = self.env_bp  # 使用默认汽车blueprint
+                else:
+                    agent_bp = self.env_bp  # 使用默认汽车blueprint
+
+                # 设置颜色（自行车和行人不需要颜色属性）
+                if not is_walker and 'bicycle' not in agent_bp.id and 'bike' not in agent_bp.id:
+                    if agent_bp.has_attribute('color'):
+                        agent_bp.set_attribute('color', '255,0,0')  # 红色
+
                 vehicle = None
                 transform = spawn
                 for attempt in range(10):
-                    candidate = self.world.try_spawn_actor(self.env_bp, transform)
+                    candidate = self.world.try_spawn_actor(agent_bp, transform)
                     if candidate is not None:
                         vehicle = candidate
                         break
@@ -311,12 +330,21 @@ class CarlaSimulator:
 
                 self.env_vehicles.append(vehicle)
 
-                # 设置初始速度（朝向车辆前方）
+                # 设置初始速度（根据类型不同）
                 import math
                 yaw_rad = math.radians(transform.rotation.yaw)
+
+                # 根据agent类型设置不同的初始速度
+                if is_walker:
+                    initial_speed = 1.2  # 行人速度 m/s
+                elif 'bike' in agent_bp.id or 'bicycle' in agent_bp.id:
+                    initial_speed = 1.5  # 自行车速度 m/s
+                else:
+                    initial_speed = 2.0  # 汽车速度 m/s
+
                 initial_velocity = Vector3D(
-                    x=2.0 * math.cos(yaw_rad),  # 初始速度2m/s
-                    y=2.0 * math.sin(yaw_rad),
+                    x=initial_speed * math.cos(yaw_rad),
+                    y=initial_speed * math.sin(yaw_rad),
                     z=0
                 )
                 vehicle.set_target_velocity(initial_velocity)
@@ -327,8 +355,10 @@ class CarlaSimulator:
                     self.tm.ignore_signs_percentage(vehicle, 100)
                     self.tm.ignore_lights_percentage(vehicle, 100)
 
-                print(f"  - 环境车辆{i+1}: 位置=({transform.location.x:.1f}, {transform.location.y:.1f}), "
-                      f"朝向={transform.rotation.yaw:.1f}°, 速度=2m/s")
+                # 获取agent类型名称
+                agent_type_name = "行人" if is_walker else ("自行车" if 'bike' in agent_bp.id or 'bicycle' in agent_bp.id else "车辆")
+                print(f"  - {agent_type_name}{i+1}: 位置=({transform.location.x:.1f}, {transform.location.y:.1f}), "
+                      f"朝向={transform.rotation.yaw:.1f}°, 速度={initial_speed}m/s")
 
         # 前进一个时间步
         self.world.tick()
@@ -375,12 +405,23 @@ class CarlaSimulator:
             v_vel = vehicle.get_velocity()
             v_rot = vehicle.get_transform().rotation
 
+            # 根据actor的blueprint判断agent类型
+            blueprint_id = vehicle.type_id
+            if 'walker' in blueprint_id.lower() or 'pedestrian' in blueprint_id.lower():
+                agent_type = AgentType.PEDESTRIAN
+            elif 'bike' in blueprint_id.lower() or 'bicycle' in blueprint_id.lower():
+                agent_type = AgentType.BICYCLE
+            elif 'motorcycle' in blueprint_id.lower():
+                agent_type = AgentType.MOTORCYCLE
+            else:
+                agent_type = AgentType.VEHICLE
+
             agent_state = AgentState(
                 agent_id=f"vehicle-{vehicle.id}",  # 使用CARLA actor ID确保唯一性
                 position_m=(v_loc.x, v_loc.y),
                 velocity_mps=(v_vel.x, v_vel.y),
                 heading_rad=math.radians(v_rot.yaw),
-                agent_type=AgentType.VEHICLE
+                agent_type=agent_type
             )
             agents.append(agent_state)
             valid_vehicles.append(vehicle)  # 只保留有效的vehicle

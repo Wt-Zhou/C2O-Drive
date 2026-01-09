@@ -111,6 +111,7 @@ class CarlaScenarioLibrary:
 
         metadata = {
             "source": "TestScenario_Town03_Waymo_long_tail.py",
+            "agent_types": ["vehicle"],  # 逆行车辆
             "agent_speed_range_mps": (5.0, 10.0),   # 初速度 3~8 m/s
             "entry_angle_range_deg": (-20.0, 20.0),  # 以 100° 为中心的偏差
         }
@@ -147,28 +148,29 @@ class CarlaScenarioLibrary:
         ego_spawn = (5.5, -90.0, 0.5, -90.0)
 
         # Agent 1: 右侧后方的cut-in车辆
-        cut_in_vehicle = (10.5, -80.0, 0.5, -90.0)  # 右侧5米，后方10米
+        cut_in_vehicle = (10.5, -85.0, 0.5, -90.0)  # 右侧5米，后方10米
 
-        # Agent 2: 前方背景车辆
-        front_vehicle = (5.5, -110.0, 0.5, -90.0)   # 前方20米
+        # # Agent 2: 前方背景车辆
+        # front_vehicle = (5.5, -110.0, 0.5, -90.0)   # 前方20米
 
         # Agent 3: 后方背景车辆
         rear_vehicle = (5.5, -60.0, 0.5, -90.0)     # 后方30米
 
         metadata = {
             "source": "user_defined",
+            "agent_types": ["vehicle", "vehicle"],  # 切入车辆、后方车辆
             "agent_speed_range_mps": (5.0, 10.0),
             "cut_in_direction": "right",  # 标记cut-in方向
             "agent_trajectories": {
                 0: [  # 第一辆车（cut-in车辆）的轨迹
-                    (10.5, -80.0),   # 起始位置（右侧后方）
-                    (10.5, -85.0),   # 向前行驶
-                    (9.5, -90.0),    # 开始切入
-                    (8.0, -95.0),    # 继续切入
-                    (6.5, -100.0),   # 接近自车道
-                    (5.5, -105.0),   # 完成切入到自车道
-                    (5.5, -110.0),   # 在自车道继续行驶
-                    (5.5, -115.0),   # 继续前进
+                    (10.5, -85),   # 起始位置（右侧后方）
+                    (10.5, -90.0),   # 向前行驶
+                    (9.5, -95.0),    # 开始切入
+                    (8.0, -100.0),    # 继续切入
+                    (6.5, -105.0),   # 接近自车道
+                    (5.5, -110.0),   # 完成切入到自车道
+                    (5.5, -115.0),   # 在自车道继续行驶
+                    (5.5, -120.0),   # 继续前进
                 ]
             }
         }
@@ -178,7 +180,8 @@ class CarlaScenarioLibrary:
             description="右侧车辆变道切入场景",
             town="Town03",
             ego_spawn=ego_spawn,
-            agent_spawns=[cut_in_vehicle, front_vehicle, rear_vehicle],
+            # agent_spawns=[cut_in_vehicle, front_vehicle, rear_vehicle],
+            agent_spawns=[cut_in_vehicle, rear_vehicle],
             reference_path_mode="straight",
             autopilot=False,
             difficulty="medium",
@@ -206,23 +209,72 @@ class CarlaScenarioLibrary:
         - spawn 仅设置初始位置，运动模式通过 metadata 标记
         """
         # 自车位置（与s1/s2相同）
-        ego_spawn = (5.5, -90.0, 0.5, -90.0)
+        ego_spawn = (9.5, -90.0, 0.5, -90.0)
 
         # Agent 1: 右前方波浪行驶的自行车
-        bicycle = (9.5, -105.0, 0.5, -90.0)  # 右侧4米，前方15米
+        bicycle = (11.5, -100.0, 0.5, -90.0)  # 右侧6米（自行车道），前方10米
 
         # Agent 2: 前方背景车辆
-        front_vehicle = (5.5, -120.0, 0.5, -90.0)  # 前方30米
+        front_vehicle = (5.5, -100.0, 0.5, -90.0)  # 前方30米
 
         # Agent 3: 后方背景车辆
-        rear_vehicle = (5.5, -70.0, 0.5, -90.0)    # 后方20米
+        rear_vehicle = (5.5, -90.0, 0.5, -90.0)    # 后方20米
 
         metadata = {
             "source": "user_defined",
-            "agent_speed_range_mps": (3.0, 6.0),  # 自行车速度较慢
+            "agent_types": ["bicycle", "vehicle", "vehicle"],  # 类型：自行车、汽车、汽车
+            "agent_blueprints": ["vehicle.bh.crossbike", None, None],  # CARLA blueprint IDs
+            "vehicle_types": ["bicycle", "car", "car"],  # 车辆类型
+            "agent_categories": ["bicycle", "vehicle", "vehicle"],  # 分类
+            "agent_speed_range_mps": (1, 2),  # 自行车速度较慢
             "motion_pattern": "wave",  # 标记波浪运动模式
             "wave_amplitude": 1.5,     # 波浪幅度（米）
-            "wave_frequency": 0.5,     # 波浪频率（Hz）
+            "wave_frequency": 0.3,     # 波浪频率（Hz）
+            "agent_trajectories": {
+                0: [  # 自行车的波浪轨迹（1.5 m/s速度，每步0.15米）
+                    (11.5, -100.00),    # 起始位置
+                    (11.5, -100.15),    # 直行
+                    (11.4, -100.30),    # 开始向左
+                    (11.3, -100.45),
+                    (11.1, -100.60),    # 向左摆动
+                    (10.9, -100.75),
+                    (10.7, -100.90),    # 最左侧
+                    (10.6, -101.05),
+                    (10.5, -101.20),    # 接近主车道
+                    (10.6, -101.35),    # 开始向右
+                    (10.7, -101.50),
+                    (10.9, -101.65),
+                    (11.1, -101.80),    # 回到中心
+                    (11.3, -101.95),
+                    (11.5, -102.10),    # 中心位置
+                    (11.7, -102.25),    # 开始向右
+                    (11.9, -102.40),
+                    (12.1, -102.55),    # 向右摆动
+                    (12.3, -102.70),
+                    (12.5, -102.85),    # 最右侧
+                    (12.6, -103.00),
+                    (12.7, -103.15),    # 远离主车道
+                    (12.6, -103.30),    # 开始向左
+                    (12.5, -103.45),
+                    (12.3, -103.60),
+                    (12.1, -103.75),    # 回到中心
+                    (11.9, -103.90),
+                    (11.7, -104.05),
+                    (11.5, -104.20),    # 中心位置
+                    (11.3, -104.35),    # 再次向左
+                    (11.1, -104.50),
+                    (10.9, -104.65),    # 向左摆动
+                    (10.7, -104.80),
+                    (10.5, -104.95),    # 最左侧
+                    (10.6, -105.10),    # 开始向右
+                    (10.7, -105.25),
+                    (10.9, -105.40),
+                    (11.1, -105.55),
+                    (11.3, -105.70),
+                    (11.5, -105.85),    # 回到中心
+                    (11.5, -106.00),    # 继续前进
+                ]
+            }
         }
 
         return ScenarioDefinition(
@@ -265,6 +317,8 @@ class CarlaScenarioLibrary:
 
         metadata = {
             "source": "user_defined",
+            "agent_types": ["walker"],  # 行人
+            "agent_blueprints": ["walker.pedestrian.0001"],  # CARLA行人blueprint
             "agent_speed_range_mps": (1.2, 1.5),  # 正常步行速度
             "motion_pattern": "crossing_decelerate",  # 横穿减速模式
             "deceleration_position_x": 5.5,  # 在道路中间减速（主车道位置）
@@ -301,6 +355,7 @@ class CarlaScenarioLibrary:
 
         metadata = {
             "source": "user_defined",
+            "agent_types": ["vehicle"],  # 默认为车辆
             "agent_speed_range_mps": (3.0, 8.0),
         }
 
