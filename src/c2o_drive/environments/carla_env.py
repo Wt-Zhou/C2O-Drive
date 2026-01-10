@@ -199,35 +199,69 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
 
                     # 为该车辆设置目标速度向量
                     vehicle = self.simulator.env_vehicles[agent_idx]
-                    dx = next_pos[0] - current_pos[0]
-                    dy = next_pos[1] - current_pos[1]
 
-                    # 计算速度（基于时间步长）
-                    vx = dx / self.dt
-                    vy = dy / self.dt
+                    # 判断是否是行人
+                    is_walker = 'walker' in vehicle.type_id.lower() or 'pedestrian' in vehicle.type_id.lower()
 
-                    # 计算朝向
-                    import math
-                    if abs(dx) > 0.01 or abs(dy) > 0.01:
-                        target_yaw = math.degrees(math.atan2(dy, dx))
+                    if is_walker:
+                        # 行人使用直接位置和速度控制（不使用导航系统）
+                        dx = next_pos[0] - current_pos[0]
+                        dy = next_pos[1] - current_pos[1]
 
-                        # 设置朝向和速度
+                        # 计算速度
+                        vx = dx / self.dt
+                        vy = dy / self.dt
+
                         try:
-                            from carla import Vector3D, Transform, Rotation
-                            # 更新朝向
-                            current_transform = vehicle.get_transform()
-                            new_rotation = Rotation(
-                                pitch=current_transform.rotation.pitch,
-                                yaw=target_yaw,
-                                roll=current_transform.rotation.roll
-                            )
-                            vehicle.set_transform(Transform(current_transform.location, new_rotation))
+                            from carla import Vector3D, Transform, Location, Rotation
+                            import math
 
-                            # 设置速度
-                            velocity_vector = Vector3D(x=vx, y=vy, z=0)
-                            vehicle.set_target_velocity(velocity_vector)
+                            # 计算朝向
+                            if abs(dx) > 0.001 or abs(dy) > 0.001:
+                                target_yaw = math.degrees(math.atan2(dy, dx))
+                            else:
+                                # 如果几乎不动，保持当前朝向
+                                target_yaw = vehicle.get_transform().rotation.yaw
+
+                            # 直接设置位置和朝向
+                            new_location = Location(x=next_pos[0], y=next_pos[1], z=0.5)
+                            new_rotation = Rotation(yaw=target_yaw, pitch=0, roll=0)
+                            new_transform = Transform(new_location, new_rotation)
+                            vehicle.set_transform(new_transform)
+
                         except Exception as e:
                             pass
+                    else:
+                        # 车辆使用速度控制
+                        dx = next_pos[0] - current_pos[0]
+                        dy = next_pos[1] - current_pos[1]
+
+                        # 计算速度（基于时间步长）
+                        vx = dx / self.dt
+                        vy = dy / self.dt
+
+                        # 计算朝向
+                        import math
+                        if abs(dx) > 0.01 or abs(dy) > 0.01:
+                            target_yaw = math.degrees(math.atan2(dy, dx))
+
+                            # 设置朝向和速度
+                            try:
+                                from carla import Vector3D, Transform, Rotation
+                                # 更新朝向
+                                current_transform = vehicle.get_transform()
+                                new_rotation = Rotation(
+                                    pitch=current_transform.rotation.pitch,
+                                    yaw=target_yaw,
+                                    roll=current_transform.rotation.roll
+                                )
+                                vehicle.set_transform(Transform(current_transform.location, new_rotation))
+
+                                # 设置速度
+                                velocity_vector = Vector3D(x=vx, y=vy, z=0)
+                                vehicle.set_target_velocity(velocity_vector)
+                            except Exception as e:
+                                pass
 
         for _ in range(self._substeps):
             next_state = self.simulator.step(action)
@@ -307,6 +341,7 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
         """
         # 优先使用CARLA碰撞传感器
         if self.simulator and self.simulator.is_collision_occurred():
+            print(f"⚠️ 碰撞传感器触发！自车位置: {state.ego.position_m}")
             return True
 
         # 备份：简单距离检测（根据agent类型使用不同阈值）
@@ -330,6 +365,10 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
                 collision_threshold = 3.5  # 汽车：较大的碰撞距离
 
             if distance < collision_threshold:
+                print(f"⚠️ 距离碰撞检测触发！")
+                print(f"   自车位置: {state.ego.position_m}")
+                print(f"   {agent.agent_type.value}位置: {agent.position_m}")
+                print(f"   距离: {distance:.2f}m < 阈值: {collision_threshold}m")
                 return True
 
         return False

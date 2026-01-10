@@ -41,7 +41,7 @@ class PPOConfig(PlannerConfig):
     hidden_dims: Tuple[int, ...] = (256, 256)
 
     # ========== PPO Hyperparameters ==========
-    horizon: int = 10  # Planning horizon (synchronized with lattice)
+    horizon: int = 30  # Planning horizon (synchronized with lattice)
     learning_rate: float = 3e-4
     gamma: float = 0.99
     gae_lambda: float = 0.95

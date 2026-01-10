@@ -168,6 +168,7 @@ class CarlaSimulator:
         self.ego_collision_sensor = None
         self.ego_collision_occurred = False
         self.env_vehicles = []
+        self.walker_controllers = {}  # 行人控制器字典 {agent_index: controller}
         self.current_time = 0.0
 
         # 相机设置
@@ -288,6 +289,7 @@ class CarlaSimulator:
 
         # 生成环境车辆（包括行人）
         self.env_vehicles = []
+        self.walker_controllers = {}
         if agent_spawns:
             for i, spawn in enumerate(agent_spawns):
                 # 根据metadata选择正确的blueprint
@@ -330,24 +332,32 @@ class CarlaSimulator:
 
                 self.env_vehicles.append(vehicle)
 
-                # 设置初始速度（根据类型不同）
-                import math
-                yaw_rad = math.radians(transform.rotation.yaw)
-
-                # 根据agent类型设置不同的初始速度
+                # 为行人创建AI控制器
                 if is_walker:
-                    initial_speed = 1.2  # 行人速度 m/s
-                elif 'bike' in agent_bp.id or 'bicycle' in agent_bp.id:
-                    initial_speed = 1.5  # 自行车速度 m/s
+                    initial_speed = 1.3  # 行人速度
+                    walker_controller_bp = self.world.get_blueprint_library().find('controller.ai.walker')
+                    walker_controller = self.world.spawn_actor(walker_controller_bp, carla.Transform(), vehicle)
+                    self.walker_controllers[i] = walker_controller  # 使用agent索引作为key
+                    # 启动行人AI
+                    walker_controller.start()
+                    walker_controller.set_max_speed(initial_speed)  # 设置最大速度
                 else:
-                    initial_speed = 2.0  # 汽车速度 m/s
+                    # 设置初始速度（车辆和自行车）
+                    import math
+                    yaw_rad = math.radians(transform.rotation.yaw)
 
-                initial_velocity = Vector3D(
-                    x=initial_speed * math.cos(yaw_rad),
-                    y=initial_speed * math.sin(yaw_rad),
-                    z=0
-                )
-                vehicle.set_target_velocity(initial_velocity)
+                    # 根据agent类型设置不同的初始速度
+                    if 'bike' in agent_bp.id or 'bicycle' in agent_bp.id:
+                        initial_speed = 1.5  # 自行车速度 m/s
+                    else:
+                        initial_speed = 2.0  # 汽车速度 m/s
+
+                    initial_velocity = Vector3D(
+                        x=initial_speed * math.cos(yaw_rad),
+                        y=initial_speed * math.sin(yaw_rad),
+                        z=0
+                    )
+                    vehicle.set_target_velocity(initial_velocity)
 
                 # 配置交通管理器
                 if agent_autopilot:
@@ -364,13 +374,13 @@ class CarlaSimulator:
         self.world.tick()
         self.current_time = 0.0
 
-        # 更新相机到自车俯视图
+        # 设置固定视角相机（仅在创建场景时设置一次）
         self._update_camera()
 
         # 返回初始WorldState
         world_state = self.get_world_state()
         print(f"✅ 场景已创建: 自车 + {len(self.env_vehicles)} 环境车辆")
-        print(f"📷 相机已聚焦到自车俯视图 (高度={self.camera_height}m)")
+        print(f"📷 相机设置为固定俯视图 (高度={self.camera_height}m)")
         return world_state
 
     def get_world_state(self) -> WorldState:
@@ -470,8 +480,8 @@ class CarlaSimulator:
         self.world.tick()
         self.current_time += self.dt
 
-        # 更新相机跟随自车
-        self._update_camera()
+        # 相机固定视角，不跟随自车
+        # self._update_camera()
 
         return self.get_world_state()
 
@@ -536,8 +546,8 @@ class CarlaSimulator:
                 self.world.tick()
                 self.current_time += self.dt
 
-                # 更新相机跟随自车
-                self._update_camera()
+                # 相机固定视角，不跟随
+                # self._update_camera()
 
                 # 记录WorldState
                 world_states.append(self.get_world_state())
@@ -575,8 +585,8 @@ class CarlaSimulator:
                 self.world.tick()
                 self.current_time += self.dt
 
-                # 更新相机跟随自车
-                self._update_camera()
+                # 相机固定视角，不跟随
+                # self._update_camera()
 
                 # 记录WorldState
                 world_states.append(self.get_world_state())
@@ -588,7 +598,7 @@ class CarlaSimulator:
         return self.ego_collision_occurred
 
     def cleanup(self):
-        """清理所有车辆和传感器"""
+        """清理所有车辆、行人和传感器"""
         destroyed_ids = set()  # 记录已删除的actor ID，避免重复删除
 
         # 1. 销毁碰撞传感器
@@ -597,35 +607,56 @@ class CarlaSimulator:
             destroyed_ids.add(self.ego_collision_sensor.id)
         self.ego_collision_sensor = None
 
-        # 2. 销毁自车
+        # 2. 销毁行人控制器
+        for agent_idx, controller in self.walker_controllers.items():
+            try:
+                if controller.is_alive:
+                    controller.stop()
+                    controller.destroy()
+                    destroyed_ids.add(controller.id)
+            except Exception:
+                pass
+        self.walker_controllers = {}
+
+        # 3. 销毁自车
         if self.ego_vehicle is not None and self.ego_vehicle.is_alive:
             self.ego_vehicle.destroy()
             destroyed_ids.add(self.ego_vehicle.id)
         self.ego_vehicle = None
 
-        # 3. 销毁env_vehicles列表中的车辆
+        # 4. 销毁env_vehicles列表中的车辆和行人
         for vehicle in self.env_vehicles:
             if vehicle.is_alive:
                 vehicle.destroy()
                 destroyed_ids.add(vehicle.id)
         self.env_vehicles = []
 
-        # 4. 清理残留车辆（添加异常保护，确保单个失败不影响整体清理）
+        # 5. 清理残留的车辆
         try:
             actor_list = self.world.get_actors().filter("*vehicle*")
             for actor in actor_list:
-                # 跳过已删除的actor
                 if actor.id in destroyed_ids:
                     continue
                 try:
-                    # 删除所有车辆
                     if actor.is_alive:
                         actor.destroy()
                 except Exception:
-                    # 单个actor删除失败不影响其他actor的清理
                     pass
         except Exception:
-            # get_actors失败不影响前面已完成的清理
+            pass
+
+        # 6. 清理残留的行人
+        try:
+            walker_list = self.world.get_actors().filter("*walker*")
+            for actor in walker_list:
+                if actor.id in destroyed_ids:
+                    continue
+                try:
+                    if actor.is_alive:
+                        actor.destroy()
+                except Exception:
+                    pass
+        except Exception:
             pass
 
     def set_vehicle_trajectory(self, vehicle_index: int, trajectory: List[Tuple[float, float]],
@@ -763,8 +794,8 @@ class CarlaSimulator:
             self.world.tick()
             self.current_time += self.dt
 
-            # 更新相机
-            self._update_camera()
+            # 相机固定视角，不跟随
+            # self._update_camera()
 
             # 记录状态
             world_states.append(self.get_world_state())

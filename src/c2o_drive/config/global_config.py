@@ -256,7 +256,7 @@ class LatticeConfig:
     lateral_offsets: list = None    # 横向偏移量（米）
     speed_variations: list = None   # 速度变化（m/s）
     dt: float = 1.0                 # 时间步长（秒）
-    horizon: int = 10               # 预测时间步数
+    horizon: int = 50               # 预测时间步数（增加以允许更长的episode）
 
     def __post_init__(self):
         if self.lateral_offsets is None:

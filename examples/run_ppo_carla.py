@@ -339,8 +339,11 @@ class PPOTrainer:
         selected_trajectory = candidate_trajectories[action_idx]
         num_waypoints = len(selected_trajectory.waypoints)
 
+        original_max_steps = max_steps
         # Limit episode length to trajectory length
         max_steps = min(max_steps, num_waypoints - 1)
+
+        print(f"📊 轨迹信息: 轨迹点数={num_waypoints}, 原始max_steps={original_max_steps}, 限制后max_steps={max_steps}")
 
         # 3. Execute trajectory waypoint by waypoint
         episode_reward = 0.0
