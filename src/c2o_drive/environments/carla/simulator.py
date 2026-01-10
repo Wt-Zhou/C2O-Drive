@@ -201,24 +201,34 @@ class CarlaSimulator:
         self.ego_collision_occurred = True
         print(f"⚠️ 碰撞检测: 自车与 {event.other_actor.type_id} 发生碰撞")
 
-    def _update_camera(self, follow_ego: bool = True):
-        """更新相机位置，聚焦自车俯视图
+    def _update_camera(self, follow_ego: bool = True, fixed_position: tuple = None):
+        """更新相机位置，聚焦自车俯视图或固定位置
 
         Args:
             follow_ego: 是否跟随自车
+            fixed_position: 固定相机位置(x, y)，如果指定则忽略follow_ego
         """
-        if not follow_ego or self.ego_vehicle is None:
+        if self.ego_vehicle is None and fixed_position is None:
             return
 
-        # 获取自车位置
-        ego_location = self.ego_vehicle.get_location()
-
-        # 设置相机到自车正上方
-        camera_location = Location(
-            x=ego_location.x,
-            y=ego_location.y,
-            z=ego_location.z + self.camera_height
-        )
+        # 如果指定了固定位置，使用固定位置
+        if fixed_position is not None:
+            camera_location = Location(
+                x=fixed_position[0],
+                y=fixed_position[1],
+                z=self.camera_height
+            )
+        elif follow_ego and self.ego_vehicle is not None:
+            # 获取自车位置
+            ego_location = self.ego_vehicle.get_location()
+            # 设置相机到自车正上方
+            camera_location = Location(
+                x=ego_location.x,
+                y=ego_location.y,
+                z=ego_location.z + self.camera_height
+            )
+        else:
+            return
 
         camera_rotation = Rotation(
             pitch=self.camera_pitch,
@@ -287,26 +297,29 @@ class CarlaSimulator:
         self.ego_collision_sensor.listen(self._on_collision)
         self.ego_collision_occurred = False
 
-        # 生成环境车辆（包括行人）
+        # 生成环境车辆（包括行人和静态障碍物）
         self.env_vehicles = []
         self.walker_controllers = {}
         if agent_spawns:
             for i, spawn in enumerate(agent_spawns):
                 # 根据metadata选择正确的blueprint
                 is_walker = False
+                is_static = False
                 if metadata and 'agent_blueprints' in metadata and i < len(metadata['agent_blueprints']):
                     blueprint_id = metadata['agent_blueprints'][i]
                     if blueprint_id:
                         if 'walker' in blueprint_id.lower():
                             is_walker = True
+                        elif 'static' in blueprint_id.lower() or 'prop' in blueprint_id.lower():
+                            is_static = True
                         agent_bp = self.world.get_blueprint_library().find(blueprint_id)
                     else:
                         agent_bp = self.env_bp  # 使用默认汽车blueprint
                 else:
                     agent_bp = self.env_bp  # 使用默认汽车blueprint
 
-                # 设置颜色（自行车和行人不需要颜色属性）
-                if not is_walker and 'bicycle' not in agent_bp.id and 'bike' not in agent_bp.id:
+                # 设置颜色（自行车、行人和静态物体不需要颜色属性）
+                if not is_walker and not is_static and 'bicycle' not in agent_bp.id and 'bike' not in agent_bp.id:
                     if agent_bp.has_attribute('color'):
                         agent_bp.set_attribute('color', '255,0,0')  # 红色
 
@@ -332,6 +345,11 @@ class CarlaSimulator:
 
                 self.env_vehicles.append(vehicle)
 
+                # 静态障碍物不需要速度和控制器
+                if is_static:
+                    print(f"✓ 静态障碍物{i+1} ({agent_bp.id}) 已生成")
+                    continue
+
                 # 为行人创建AI控制器
                 if is_walker:
                     initial_speed = 1.3  # 行人速度
@@ -350,7 +368,11 @@ class CarlaSimulator:
                     if 'bike' in agent_bp.id or 'bicycle' in agent_bp.id:
                         initial_speed = 1.5  # 自行车速度 m/s
                     else:
-                        initial_speed = 2.0  # 汽车速度 m/s
+                        # 对向车辆（索引0）速度更快一些
+                        if i == 0:
+                            initial_speed = 1.5  # 对向车辆速度 m/s
+                        else:
+                            initial_speed = 2.0  # 其他车辆速度 m/s
 
                     initial_velocity = Vector3D(
                         x=initial_speed * math.cos(yaw_rad),
@@ -375,12 +397,21 @@ class CarlaSimulator:
         self.current_time = 0.0
 
         # 设置固定视角相机（仅在创建场景时设置一次）
-        self._update_camera()
+        # 从metadata读取相机位置（如果有）
+        camera_pos = None
+        if metadata and 'camera_position' in metadata:
+            camera_pos = metadata['camera_position']
+            print(f"📷 使用场景指定的相机位置: ({camera_pos[0]}, {camera_pos[1]})")
+
+        self._update_camera(fixed_position=camera_pos)
 
         # 返回初始WorldState
         world_state = self.get_world_state()
         print(f"✅ 场景已创建: 自车 + {len(self.env_vehicles)} 环境车辆")
-        print(f"📷 相机设置为固定俯视图 (高度={self.camera_height}m)")
+        if camera_pos:
+            print(f"📷 相机设置为固定位置 ({camera_pos[0]}, {camera_pos[1]}) 俯视图 (高度={self.camera_height}m)")
+        else:
+            print(f"📷 相机设置为跟随自车俯视图 (高度={self.camera_height}m)")
         return world_state
 
     def get_world_state(self) -> WorldState:
@@ -424,6 +455,7 @@ class CarlaSimulator:
             elif 'motorcycle' in blueprint_id.lower():
                 agent_type = AgentType.MOTORCYCLE
             else:
+                # 静态障碍物和车辆都归为VEHICLE类型
                 agent_type = AgentType.VEHICLE
 
             agent_state = AgentState(
@@ -649,6 +681,20 @@ class CarlaSimulator:
         try:
             walker_list = self.world.get_actors().filter("*walker*")
             for actor in walker_list:
+                if actor.id in destroyed_ids:
+                    continue
+                try:
+                    if actor.is_alive:
+                        actor.destroy()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # 7. 清理残留的静态道具（锥桶、箱子等）
+        try:
+            prop_list = self.world.get_actors().filter("*prop*")
+            for actor in prop_list:
                 if actor.id in destroyed_ids:
                     continue
                 try:

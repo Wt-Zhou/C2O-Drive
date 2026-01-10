@@ -424,31 +424,75 @@ class CarlaScenarioLibrary:
 
     @staticmethod
     def s5_scenario() -> ScenarioDefinition:
-        """S5: [待填写场景名称]
+        """S5: 施工路段绕行场景
 
-        场景描述：[在此填写一句话描述，例如：路口横向车辆闯红灯]
+        场景描述：自车在南北向车道上北行，前方遇到施工路段有锥桶和箱子阻碍车道，
+                  需要绕行到对向车道，此时对向有车辆驶来
 
         参数说明：
-        - 自车位置和朝向
-        - 环境车辆位置和行为
-        - TODO: 根据实际测试场景填写具体参数
+        - 自车位置：(30, -150, 0.5, 0°) 朝北行驶
+        - 对向车辆：(50, -160, 0.5, 180°) 朝南驶来
+        - 施工区域：(40, -150) 附近，使用锥桶和箱子等静态障碍物阻挡车道
+
+        坐标系统：
+        - X轴正方向：东侧
+        - Y轴负方向：南侧
+        - Yaw=0°：朝北（自车方向）
+        - Yaw=180°：朝南（对向车辆方向）
         """
-        # TODO: 修改为实际坐标
-        ego_spawn = (0.0, 0.0, 0.5, 0.0)
-        agent_spawn = (10.0, 0.0, 0.5, 0.0)
+        # 自车位置（南北车道，朝北行驶）
+        ego_spawn = (20.0, -134.0, 0.5, 0.0)
+
+        # 对向车辆（从东向西驶来）
+        oncoming_vehicle = (70.0, -137.5, 9, 180.0)
+
+        # 施工区域障碍物（锥桶和箱子阻挡自车道）
+        # 放在自车前方X=40附近（自车和对向车之间），形成施工区域
+        cone1 = (40.0, -135.0, 5, 0.0)   # 锥桶1（施工区域起点）
+        cone2 = (40.5, -133.0, 5, 0.0)   # 锥桶2
+        cone3 = (41.0, -133.0, 5, 0.0)   # 锥桶3
+        box1 = (40.5, -134.0, 5, 0.0)    # 箱子1（施工区域中央）
+        box2 = (41.0, -133.5, 5, 0.0)    # 箱子2
+        cone4 = (41.5, -134.0, 5, 0.0)   # 锥桶4（施工区域末端）
+        cone5 = (42.0, -133.0, 5, 0.0)   # 锥桶5
+
+        # 所有agent spawns：对向车辆 + 静态障碍物
+        agent_spawns = [
+            oncoming_vehicle,  # 索引0：对向车辆
+            cone1,  # 索引1-7：静态障碍物
+            cone2,
+            cone3,
+            box1,
+            box2,
+            cone4,
+            cone5,
+        ]
 
         metadata = {
             "source": "user_defined",
-            "agent_types": ["vehicle"],  # 默认为车辆
-            "agent_speed_range_mps": (3.0, 8.0),
+            "agent_types": ["vehicle", "obstacle", "obstacle", "obstacle", "obstacle", "obstacle", "obstacle", "obstacle"],
+            "agent_blueprints": [
+                "vehicle.audi.tt",              # 对向车辆
+                "static.prop.trafficcone02",    # 锥桶
+                "static.prop.trafficcone02",
+                "static.prop.trafficcone02",
+                "static.prop.box03",            # 箱子
+                "static.prop.box02",
+                "static.prop.trafficcone02",
+                "static.prop.trafficcone02",
+            ],
+            "agent_speed_range_mps": (1.5, 1.5),  # 对向车辆速度1.5 m/s（匀速直线）
+            "camera_position": (40.0, -150.0),  # S5场景的固定相机位置
+            # S5不使用轨迹控制，对向车辆通过velocity控制实现匀速直线行驶
+            # 静态障碍物不需要移动
         }
 
         return ScenarioDefinition(
             name="s5_scenario",
-            description="[填写场景描述]",  # TODO: 修改为实际场景描述
-            town="Town03",  # TODO: 修改为实际地图
+            description="施工路段绕行场景",
+            town="Town03",
             ego_spawn=ego_spawn,
-            agent_spawns=[agent_spawn],
+            agent_spawns=agent_spawns,
             reference_path_mode="straight",
             autopilot=False,
             difficulty="medium",

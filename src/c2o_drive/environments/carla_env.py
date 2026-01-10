@@ -151,10 +151,20 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
         self._episode_trajectory = []  # 清空轨迹记录
         self._previous_action = None
 
-        # 存储预定义的agent轨迹（如果有）
+        # 存储场景名称和预定义的agent轨迹（如果有）
+        self._scenario_name = scenario_def.name if scenario_def else None
         self._agent_trajectories = None
+        self._agent_initial_z = {}  # 存储每个agent的初始Z坐标（用于保持高度）
         if scenario_def is not None and scenario_def.metadata is not None:
             self._agent_trajectories = scenario_def.metadata.get('agent_trajectories')
+
+        # 记录所有agent的初始Z坐标
+        if hasattr(self.simulator, 'env_vehicles'):
+            for i, vehicle in enumerate(self.simulator.env_vehicles):
+                try:
+                    self._agent_initial_z[i] = vehicle.get_location().z
+                except:
+                    self._agent_initial_z[i] = 0.5  # 默认地面高度
 
         reference_path = options.get('reference_path')
         if reference_path is None and scenario_def is not None:
@@ -189,6 +199,27 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
         next_state = self._current_state
         collision_occurred = False
 
+        # S5场景：持续控制对向车辆保持匀速直线行驶
+        if hasattr(self, '_scenario_name') and self._scenario_name == 's5_scenario':
+            if len(self.simulator.env_vehicles) > 0:
+                try:
+                    oncoming_vehicle = self.simulator.env_vehicles[0]
+                    if oncoming_vehicle.is_alive:
+                        from carla import Vector3D
+                        import math
+                        yaw = oncoming_vehicle.get_transform().rotation.yaw
+                        yaw_rad = math.radians(yaw)
+                        speed = 1.5  # 对向车辆速度1.5 m/s
+
+                        velocity = Vector3D(
+                            x=speed * math.cos(yaw_rad),
+                            y=speed * math.sin(yaw_rad),
+                            z=0
+                        )
+                        oncoming_vehicle.set_target_velocity(velocity)
+                except Exception:
+                    pass
+
         # 如果有预定义的agent轨迹，执行它们
         if self._agent_trajectories is not None:
             for agent_idx, trajectory in self._agent_trajectories.items():
@@ -199,6 +230,10 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
 
                     # 为该车辆设置目标速度向量
                     vehicle = self.simulator.env_vehicles[agent_idx]
+
+                    # 跳过静态障碍物
+                    if 'static' in vehicle.type_id.lower() or 'prop' in vehicle.type_id.lower():
+                        continue
 
                     # 判断是否是行人
                     is_walker = 'walker' in vehicle.type_id.lower() or 'pedestrian' in vehicle.type_id.lower()
@@ -232,35 +267,40 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
                         except Exception as e:
                             pass
                     else:
-                        # 车辆使用速度控制
+                        # 车辆使用直接位置控制（类似行人）
                         dx = next_pos[0] - current_pos[0]
                         dy = next_pos[1] - current_pos[1]
 
-                        # 计算速度（基于时间步长）
-                        vx = dx / self.dt
-                        vy = dy / self.dt
+                        # 轨迹控制已验证正常工作
+                        # if agent_idx == 0 and self._step_count < 3:
+                        #     actual_loc = vehicle.get_location()
+                        #     print(f"🚗 Agent {agent_idx} 轨迹控制: step={self._step_count}, "
+                        #           f"实际位置=({actual_loc.x:.1f}, {actual_loc.y:.1f})")
 
                         # 计算朝向
                         import math
                         if abs(dx) > 0.01 or abs(dy) > 0.01:
                             target_yaw = math.degrees(math.atan2(dy, dx))
 
-                            # 设置朝向和速度
+                            # 直接设置位置和朝向（确保车辆真的移动）
                             try:
-                                from carla import Vector3D, Transform, Rotation
-                                # 更新朝向
+                                from carla import Transform, Location, Rotation
                                 current_transform = vehicle.get_transform()
-                                new_rotation = Rotation(
-                                    pitch=current_transform.rotation.pitch,
-                                    yaw=target_yaw,
-                                    roll=current_transform.rotation.roll
-                                )
-                                vehicle.set_transform(Transform(current_transform.location, new_rotation))
 
-                                # 设置速度
-                                velocity_vector = Vector3D(x=vx, y=vy, z=0)
-                                vehicle.set_target_velocity(velocity_vector)
+                                # 使用初始Z坐标保持高度，避免翻滚
+                                z_height = self._agent_initial_z.get(agent_idx, current_transform.location.z)
+
+                                # 直接设置到目标位置
+                                new_location = Location(x=next_pos[0], y=next_pos[1], z=z_height)
+                                new_rotation = Rotation(
+                                    pitch=0.0,  # 保持水平，避免翻滚
+                                    yaw=target_yaw,
+                                    roll=0.0   # 保持水平，避免翻滚
+                                )
+                                new_transform = Transform(new_location, new_rotation)
+                                vehicle.set_transform(new_transform)
                             except Exception as e:
+                                print(f"⚠️ 设置车辆{agent_idx}位置失败: {e}")
                                 pass
 
         for _ in range(self._substeps):
