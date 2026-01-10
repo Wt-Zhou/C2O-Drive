@@ -199,27 +199,6 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
         next_state = self._current_state
         collision_occurred = False
 
-        # S5场景：持续控制对向车辆保持匀速直线行驶
-        if hasattr(self, '_scenario_name') and self._scenario_name == 's5_scenario':
-            if len(self.simulator.env_vehicles) > 0:
-                try:
-                    oncoming_vehicle = self.simulator.env_vehicles[0]
-                    if oncoming_vehicle.is_alive:
-                        from carla import Vector3D
-                        import math
-                        yaw = oncoming_vehicle.get_transform().rotation.yaw
-                        yaw_rad = math.radians(yaw)
-                        speed = 1.5  # 对向车辆速度1.5 m/s
-
-                        velocity = Vector3D(
-                            x=speed * math.cos(yaw_rad),
-                            y=speed * math.sin(yaw_rad),
-                            z=0
-                        )
-                        oncoming_vehicle.set_target_velocity(velocity)
-                except Exception:
-                    pass
-
         # 如果有预定义的agent轨迹，执行它们
         if self._agent_trajectories is not None:
             for agent_idx, trajectory in self._agent_trajectories.items():
@@ -259,7 +238,9 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
                                 target_yaw = vehicle.get_transform().rotation.yaw
 
                             # 直接设置位置和朝向
-                            new_location = Location(x=next_pos[0], y=next_pos[1], z=0.5)
+                            # 如果轨迹点包含Z坐标，使用它；否则使用默认地面高度
+                            z_height = next_pos[2] if len(next_pos) >= 3 else 0.5
+                            new_location = Location(x=next_pos[0], y=next_pos[1], z=z_height)
                             new_rotation = Rotation(yaw=target_yaw, pitch=0, roll=0)
                             new_transform = Transform(new_location, new_rotation)
                             vehicle.set_transform(new_transform)
@@ -287,15 +268,20 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
                                 from carla import Transform, Location, Rotation
                                 current_transform = vehicle.get_transform()
 
-                                # 使用初始Z坐标保持高度，避免翻滚
-                                z_height = self._agent_initial_z.get(agent_idx, current_transform.location.z)
+                                # 如果轨迹点包含Z坐标（3元组），使用它
+                                # 否则使用当前Z坐标，让车辆跟随地面（避免在下坡时悬空）
+                                if len(next_pos) >= 3:
+                                    z_height = next_pos[2]
+                                else:
+                                    z_height = current_transform.location.z
 
                                 # 直接设置到目标位置
                                 new_location = Location(x=next_pos[0], y=next_pos[1], z=z_height)
+                                # 保持当前pitch（适应地形坡度），只设置yaw和roll=0
                                 new_rotation = Rotation(
-                                    pitch=0.0,  # 保持水平，避免翻滚
+                                    pitch=current_transform.rotation.pitch,  # 保持当前pitch，适应地形
                                     yaw=target_yaw,
-                                    roll=0.0   # 保持水平，避免翻滚
+                                    roll=0.0   # 保持水平，避免侧翻
                                 )
                                 new_transform = Transform(new_location, new_rotation)
                                 vehicle.set_transform(new_transform)
