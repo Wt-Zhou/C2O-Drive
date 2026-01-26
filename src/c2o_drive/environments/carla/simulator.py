@@ -350,9 +350,22 @@ class CarlaSimulator:
                     print(f"✓ 静态障碍物{i+1} ({agent_bp.id}) 已生成")
                     continue
 
+                # 确保自行车启用physics simulation（关键：自行车默认可能关闭physics）
+                if 'bike' in agent_bp.id or 'bicycle' in agent_bp.id:
+                    vehicle.set_simulate_physics(True)
+                    # 打印自行车的bounding box信息，诊断碰撞检测问题
+                    bbox = vehicle.bounding_box.extent
+                    print(f"✓ 自行车{i+1} physics simulation已启用, bbox=(length={bbox.x*2:.2f}m, width={bbox.y*2:.2f}m, height={bbox.z*2:.2f}m)")
+
                 # 为行人创建AI控制器
                 if is_walker:
-                    initial_speed = 1.3  # 行人速度
+                    # 确保行人启用physics simulation（关键：行人默认可能关闭physics）
+                    vehicle.set_simulate_physics(True)
+                    # 打印行人的bounding box信息，诊断碰撞检测问题
+                    bbox = vehicle.bounding_box.extent
+                    print(f"✓ 行人{i+1} physics simulation已启用, bbox=(length={bbox.x*2:.2f}m, width={bbox.y*2:.2f}m, height={bbox.z*2:.2f}m)")
+
+                    initial_speed = 2.2  # 行人速度（加快：从1.3改为2.2 m/s）
                     walker_controller_bp = self.world.get_blueprint_library().find('controller.ai.walker')
                     walker_controller = self.world.spawn_actor(walker_controller_bp, carla.Transform(), vehicle)
                     self.walker_controllers[i] = walker_controller  # 使用agent索引作为key
@@ -370,7 +383,8 @@ class CarlaSimulator:
                     else:
                         # 对向车辆（索引0）速度更快一些
                         if i == 0:
-                            initial_speed = 1.5  # 对向车辆速度 m/s
+                            initial_speed = 1.8
+                              # 对向车辆速度 m/s
                         else:
                             initial_speed = 2.0  # 其他车辆速度 m/s
 
@@ -454,8 +468,10 @@ class CarlaSimulator:
                 agent_type = AgentType.BICYCLE
             elif 'motorcycle' in blueprint_id.lower():
                 agent_type = AgentType.MOTORCYCLE
+            elif 'static' in blueprint_id.lower() or 'prop' in blueprint_id.lower():
+                # 静态障碍物（锥桶、箱子等）
+                agent_type = AgentType.OBSTACLE
             else:
-                # 静态障碍物和车辆都归为VEHICLE类型
                 agent_type = AgentType.VEHICLE
 
             agent_state = AgentState(
@@ -628,6 +644,107 @@ class CarlaSimulator:
     def is_collision_occurred(self) -> bool:
         """检查是否发生碰撞"""
         return self.ego_collision_occurred
+
+    def check_near_miss(self, buffer_m: float = 2.0) -> tuple[bool, float]:
+        """使用OBB碰撞检测判断near-miss
+
+        创建一个扩大buffer_m的ego OBB，用SAT检测是否与agents碰撞。
+        如果扩大版碰撞但真实版不碰撞 → near-miss
+
+        Args:
+            buffer_m: 扩大的buffer距离（米）
+
+        Returns:
+            (near_miss, min_distance): near-miss标志和最小中心距离
+        """
+        from c2o_drive.utils.collision import ShapeBasedCollisionDetector, VehicleShape
+        from c2o_drive.core.types import AgentType, AgentDynamicsParams
+
+        if self.ego_vehicle is None or not self.env_vehicles:
+            return False, float('inf')
+
+        detector = ShapeBasedCollisionDetector()
+
+        # 获取ego信息
+        ego_transform = self.ego_vehicle.get_transform()
+        ego_location = ego_transform.location
+        ego_rotation = ego_transform.rotation
+        ego_bbox = self.ego_vehicle.bounding_box.extent
+        ego_heading = ego_rotation.yaw * 3.14159 / 180.0  # 转换为弧度
+
+        # 创建真实ego shape
+        ego_shape_real = VehicleShape(
+            center=(ego_location.x, ego_location.y),
+            length=ego_bbox.x * 2,  # extent是半长
+            width=ego_bbox.y * 2,   # extent是半宽
+            heading=ego_heading
+        )
+
+        # 创建扩大版ego shape
+        ego_shape_expanded = VehicleShape(
+            center=(ego_location.x, ego_location.y),
+            length=ego_bbox.x * 2 + buffer_m * 2,  # 长度方向扩大buffer_m
+            width=ego_bbox.y * 2 + buffer_m * 2,   # 宽度方向扩大buffer_m
+            heading=ego_heading
+        )
+
+        near_miss = False
+        min_distance = float('inf')
+
+        for agent_vehicle in self.env_vehicles:
+            if agent_vehicle is None or not agent_vehicle.is_alive:
+                continue
+
+            agent_transform = agent_vehicle.get_transform()
+            agent_location = agent_transform.location
+            agent_rotation = agent_transform.rotation
+            agent_bbox = agent_vehicle.bounding_box.extent
+            agent_heading = agent_rotation.yaw * 3.14159 / 180.0
+
+            # 检查agent的bounding box是否有效
+            if agent_bbox.x < 0.01 or agent_bbox.y < 0.01:
+                # Bounding box异常，使用默认尺寸作为fallback
+                agent_type_id = agent_vehicle.type_id.lower()
+                print(f"⚠️ 警告: Agent {agent_vehicle.type_id} 的bounding box异常: extent=({agent_bbox.x:.3f}, {agent_bbox.y:.3f}, {agent_bbox.z:.3f})")
+
+                # 根据agent类型使用不同的fallback尺寸
+                if 'walker' in agent_type_id or 'pedestrian' in agent_type_id:
+                    # 行人尺寸：长0.8m × 宽0.6m × 高1.8m（增大碰撞box）
+                    agent_bbox_fallback = type('obj', (object,), {'x': 0.4, 'y': 0.3, 'z': 0.9})()
+                    print(f"  → 使用行人默认尺寸: (0.8m × 0.6m × 1.8m)")
+                elif 'bike' in agent_type_id or 'bicycle' in agent_type_id:
+                    # 自行车尺寸：长1.8m × 宽0.6m × 高1.5m
+                    agent_bbox_fallback = type('obj', (object,), {'x': 0.9, 'y': 0.3, 'z': 0.75})()
+                    print(f"  → 使用自行车默认尺寸: (1.8m × 0.6m × 1.5m)")
+                else:
+                    # 默认车辆尺寸：长4.5m × 宽1.8m × 高1.5m
+                    agent_bbox_fallback = type('obj', (object,), {'x': 2.25, 'y': 0.9, 'z': 0.75})()
+                    print(f"  → 使用车辆默认尺寸: (4.5m × 1.8m × 1.5m)")
+
+                agent_bbox = agent_bbox_fallback
+
+            # 计算中心距离
+            center_dist = ego_location.distance(agent_location)
+            min_distance = min(min_distance, center_dist)
+
+            # 创建agent shape
+            agent_shape = VehicleShape(
+                center=(agent_location.x, agent_location.y),
+                length=agent_bbox.x * 2,
+                width=agent_bbox.y * 2,
+                heading=agent_heading
+            )
+
+            # 检测扩大版是否碰撞
+            expanded_collision = detector._check_obb_collision(ego_shape_expanded, agent_shape)
+            # 检测真实版是否碰撞（虽然CARLA已经检测了，但这里再确认）
+            real_collision = detector._check_obb_collision(ego_shape_real, agent_shape)
+
+            # Near-miss: 扩大版碰撞 && 真实版不碰撞
+            if expanded_collision and not real_collision:
+                near_miss = True
+
+        return near_miss, min_distance
 
     def cleanup(self):
         """清理所有车辆、行人和传感器"""

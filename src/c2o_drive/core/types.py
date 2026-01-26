@@ -10,9 +10,10 @@ Vector2 = Tuple[float, float]
 class AgentType(Enum):
     """智能体类型枚举。"""
     PEDESTRIAN = "pedestrian"
-    VEHICLE = "vehicle" 
+    VEHICLE = "vehicle"
     BICYCLE = "bicycle"
     MOTORCYCLE = "motorcycle"
+    OBSTACLE = "obstacle"  # 静态障碍物（锥桶、箱子等）
 
 
 @dataclass
@@ -76,6 +77,16 @@ class AgentDynamicsParams:
                 wheelbase_m=2.7,         # 典型轿车轴距
                 length_m=4.5,            # 车辆长度
                 width_m=1.8              # 车辆宽度
+            )
+        elif agent_type == AgentType.OBSTACLE:
+            return cls(
+                max_speed_mps=0.0,       # 静态障碍物不移动
+                max_accel_mps2=0.0,
+                max_decel_mps2=0.0,
+                max_yaw_rate_rps=0.0,
+                wheelbase_m=0.0,
+                length_m=0.5,            # 锥桶/箱子尺寸
+                width_m=0.5
             )
         else:
             raise ValueError(f"Unknown agent type: {agent_type}")

@@ -200,6 +200,17 @@ class CompositeRewardFunction(RewardFunction):
 
     def compute(self, state: Any, action: Any, next_state: Any, info: Dict[str, Any]) -> float:
         total_reward = 0.0
+        reward_breakdown = {}
         for reward_fn, weight in self.components:
-            total_reward += weight * reward_fn.compute(state, action, next_state, info)
+            component_name = reward_fn.__class__.__name__
+            raw_reward = reward_fn.compute(state, action, next_state, info)
+            weighted_reward = weight * raw_reward
+            reward_breakdown[component_name] = {
+                'raw': raw_reward,
+                'weight': weight,
+                'weighted': weighted_reward
+            }
+            total_reward += weighted_reward
+        # 将breakdown信息写入info供外部使用
+        info['reward_breakdown'] = reward_breakdown
         return total_reward

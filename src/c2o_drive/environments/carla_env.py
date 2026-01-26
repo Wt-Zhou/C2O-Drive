@@ -151,6 +151,11 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
         self._episode_trajectory = []  # 清空轨迹记录
         self._previous_action = None
 
+        # 保存初始位置和朝向，用于计算中心线偏离
+        # ego_spawn格式: (x, y, z, yaw)
+        self._initial_ego_spawn = scenario_def.ego_spawn if scenario_def else (0, 0, 0, 0)
+        self._initial_yaw = self._initial_ego_spawn[3]  # yaw角度（度）
+
         # 存储场景名称和预定义的agent轨迹（如果有）
         self._scenario_name = scenario_def.name if scenario_def else None
         self._agent_trajectories = None
@@ -295,28 +300,81 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
                 collision_occurred = True
                 break
 
-        # 计算奖励
-        reward = self._calculate_reward(
-            self._current_state,
-            action,
-            next_state,
-        )
-
         # 检测终止条件
         terminated = collision_occurred or self._check_collision(next_state)
         truncated = (self._step_count >= self.max_episode_steps - 1)
 
-        # 计算动力学信息（用于奖励和info）
+        # 计算动力学信息（用于奖励和info）- 必须在reward计算之前
         acceleration = self._calculate_acceleration(action, next_state)
         jerk = self._calculate_jerk(action)
 
         # 获取碰撞传感器状态
         collision_sensor_triggered = self.simulator.is_collision_occurred() if self.simulator else False
 
+        # 检测near-miss（使用OBB扩大1米检测）
+        near_miss_detected = False
+        min_distance_to_agents = float('inf')
+        if self.simulator:
+            buffer_m = 1.0  # OBB扩展距离：车辆尺寸+1米buffer
+            near_miss_detected, min_distance_to_agents = self.simulator.check_near_miss(buffer_m)
+
+        # 计算中心线偏离和前进距离（根据初始yaw判断沿哪个轴移动）
+        # CARLA坐标系: yaw=0°朝东(+X), 90°朝南(+Y), 180°朝西(-X), -90°/270°朝北(-Y)
+        ego_x, ego_y = next_state.ego.position_m
+        prev_x, prev_y = self._current_state.ego.position_m
+        init_x, init_y = self._initial_ego_spawn[0], self._initial_ego_spawn[1]
+        yaw = self._initial_yaw
+
+        # 判断主要移动方向，计算横向偏离和前进距离
+        # yaw接近0°：朝东(+X)，前进=dx，偏离=|dy|
+        # yaw接近90°：朝南(+Y)，前进=dy，偏离=|dx|
+        # yaw接近180°：朝西(-X)，前进=-dx，偏离=|dy|
+        # yaw接近-90°：朝北(-Y)，前进=-dy，偏离=|dx|
+        if abs(yaw) < 45:
+            # 朝东(+X)
+            lateral_deviation = abs(ego_y - init_y)
+            forward_progress = ego_x - prev_x
+        elif abs(yaw) > 135:
+            # 朝西(-X)
+            lateral_deviation = abs(ego_y - init_y)
+            forward_progress = prev_x - ego_x
+        elif yaw > 0:
+            # 朝南(+Y)，yaw在45°~135°之间
+            lateral_deviation = abs(ego_x - init_x)
+            forward_progress = ego_y - prev_y
+        else:
+            # 朝北(-Y)，yaw在-135°~-45°之间
+            lateral_deviation = abs(ego_x - init_x)
+            forward_progress = prev_y - ego_y
+
+        # 构建info字典 - 必须在reward计算之前传入
+        info = {
+            'collision': terminated,
+            'collision_sensor': collision_sensor_triggered,
+            'near_miss': near_miss_detected,
+            'min_distance_to_agents': min_distance_to_agents,
+            'step': self._step_count,
+            'acceleration': acceleration,
+            'jerk': jerk,
+            'lateral_deviation': lateral_deviation,
+            'forward_progress': forward_progress,
+        }
+
+        # 计算奖励（传入info字典）
+        reward = self._calculate_reward(
+            self._current_state,
+            action,
+            next_state,
+            info,
+        )
+
         # 更新状态
         self._current_state = next_state
         self._step_count += 1
         self._episode_reward += reward
+
+        # 更新info中的episode_reward
+        info['episode_reward'] = self._episode_reward
 
         # 记录轨迹
         self._episode_trajectory.append({
@@ -330,16 +388,6 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
             'jerk': jerk,
         })
         self._previous_action = action
-
-        # 完善info字典
-        info = {
-            'collision': terminated,
-            'collision_sensor': collision_sensor_triggered,
-            'step': self._step_count,
-            'episode_reward': self._episode_reward,
-            'acceleration': acceleration,
-            'jerk': jerk,
-        }
 
         return StepResult(
             observation=next_state,
@@ -355,47 +403,49 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
         state: WorldState,
         action: EgoControl,
         next_state: WorldState,
+        info: dict,
     ) -> float:
         """计算奖励"""
-        return self.reward_fn.compute(state, action, next_state, {})
+        return self.reward_fn.compute(state, action, next_state, info)
 
     def _check_collision(self, state: WorldState) -> bool:
         """检测是否发生碰撞
 
-        优先使用CARLA碰撞传感器数据，辅以距离检测作为备份。
-        根据agent类型使用不同的碰撞阈值。
+        使用CARLA碰撞传感器数据。
         """
-        # 优先使用CARLA碰撞传感器
+        # 使用CARLA碰撞传感器
         if self.simulator and self.simulator.is_collision_occurred():
             print(f"⚠️ 碰撞传感器触发！自车位置: {state.ego.position_m}")
             return True
 
-        # 备份：简单距离检测（根据agent类型使用不同阈值）
-        ego_pos = np.array(state.ego.position_m)
-
-        # 导入AgentType枚举
-        from c2o_drive.core.types import AgentType
-
-        for agent in state.agents:
-            agent_pos = np.array(agent.position_m)
-            distance = np.linalg.norm(ego_pos - agent_pos)
-
-            # 根据agent类型设置不同的碰撞阈值
-            if agent.agent_type == AgentType.BICYCLE:
-                collision_threshold = 2.0  # 自行车：较小的碰撞距离
-            elif agent.agent_type == AgentType.PEDESTRIAN:
-                collision_threshold = 1.5  # 行人：最小的碰撞距离
-            elif agent.agent_type == AgentType.MOTORCYCLE:
-                collision_threshold = 2.5  # 摩托车：中等碰撞距离
-            else:  # VEHICLE
-                collision_threshold = 3.5  # 汽车：较大的碰撞距离
-
-            if distance < collision_threshold:
-                print(f"⚠️ 距离碰撞检测触发！")
-                print(f"   自车位置: {state.ego.position_m}")
-                print(f"   {agent.agent_type.value}位置: {agent.position_m}")
-                print(f"   距离: {distance:.2f}m < 阈值: {collision_threshold}m")
-                return True
+        # # 备份：简单距离检测（根据agent类型使用不同阈值）
+        # ego_pos = np.array(state.ego.position_m)
+        #
+        # # 导入AgentType枚举
+        # from c2o_drive.core.types import AgentType
+        #
+        # for agent in state.agents:
+        #     agent_pos = np.array(agent.position_m)
+        #     distance = np.linalg.norm(ego_pos - agent_pos)
+        #
+        #     # 根据agent类型设置不同的碰撞阈值
+        #     if agent.agent_type == AgentType.BICYCLE:
+        #         collision_threshold = 2.0  # 自行车：较小的碰撞距离
+        #     elif agent.agent_type == AgentType.PEDESTRIAN:
+        #         collision_threshold = 1.5  # 行人：最小的碰撞距离
+        #     elif agent.agent_type == AgentType.MOTORCYCLE:
+        #         collision_threshold = 2.5  # 摩托车：中等碰撞距离
+        #     elif agent.agent_type == AgentType.OBSTACLE:
+        #         collision_threshold = 0.5  # 静态障碍物（锥桶、箱子）
+        #     else:  # VEHICLE
+        #         collision_threshold = 3.5  # 汽车：较大的碰撞距离
+        #
+        #     if distance < collision_threshold:
+        #         print(f"⚠️ 距离碰撞检测触发！")
+        #         print(f"   自车位置: {state.ego.position_m}")
+        #         print(f"   {agent.agent_type.value}位置: {agent.position_m}")
+        #         print(f"   距离: {distance:.2f}m < 阈值: {collision_threshold}m")
+        #         return True
 
         return False
 

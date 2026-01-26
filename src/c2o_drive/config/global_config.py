@@ -256,7 +256,7 @@ class LatticeConfig:
     lateral_offsets: list = None    # 横向偏移量（米）
     speed_variations: list = None   # 速度变化（m/s）
     dt: float = 1.0                 # 时间步长（秒）
-    horizon: int = 50               # 预测时间步数（增加以允许更长的episode）
+    horizon: int = 10               # 预测时间步数（增加以允许更长的episode）
 
     def __post_init__(self):
         if self.lateral_offsets is None:
@@ -330,7 +330,7 @@ class CarlaConfig:
 class SafetyConfig:
     """安全和预测评估相关配置"""
     # Near miss detection
-    near_miss_threshold_m: float = 3.0       # Near miss距离阈值（米）
+    near_miss_threshold_m: float = 4       # Near miss距离阈值（米）
 
     # Confidence set configuration
     confidence_level: float = 0.95           # Confidence set置信水平（95%）
