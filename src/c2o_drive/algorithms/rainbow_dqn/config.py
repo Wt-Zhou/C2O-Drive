@@ -25,7 +25,7 @@ class RainbowNetworkConfig:
     num_atoms: int = 51
     v_min: float = -100.0
     v_max: float = 100.0
-    noisy_sigma: float = 0.5
+    noisy_sigma: float = 0.8
     num_actions: int = 15  # Will be set to lattice.num_trajectories
 
 
@@ -64,7 +64,7 @@ class TrainingConfig:
     n_step: int = 3
     target_update_freq: int = 1000
     gradient_clip: float = 10.0
-    warmup_steps: int = 1000
+    warmup_steps: int = 100
 
 
 @dataclass
@@ -165,8 +165,8 @@ class RainbowDQNConfig(PlannerConfig):
             lattice=LatticePlannerConfig(
                 lateral_offsets=gc.lattice.lateral_offsets if hasattr(gc, 'lattice') else [-3.0, -2.0, 0.0, 2.0, 3.0],
                 speed_variations=gc.lattice.speed_variations if hasattr(gc, 'lattice') else [4.0, 6.0, 8.0],
-                horizon=gc.time.default_horizon if hasattr(gc, 'time') else 10,
-                dt=gc.time.dt if hasattr(gc, 'time') else 1.0,
+                horizon=gc.lattice.horizon if hasattr(gc, 'lattice') else 10,
+                dt=gc.lattice.dt if hasattr(gc, 'lattice') else 1.0,
             ),
             grid=GridConfig(
                 grid_size_m=gc.grid.cell_size_m if hasattr(gc, 'grid') else 0.5,

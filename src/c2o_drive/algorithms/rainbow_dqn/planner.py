@@ -220,7 +220,9 @@ class RainbowDQNPlanner(EpisodicAlgorithmPlanner[WorldState, EgoControl]):
         if len(self.replay_buffer) < self.config.training.batch_size:
             return UpdateMetrics(custom={'buffer_size': len(self.replay_buffer)})
 
-        if self._step_count < self.config.training.warmup_steps:
+        # Episode-level training uses one transition per episode, so gate warmup
+        # on buffer size rather than per-step count.
+        if len(self.replay_buffer) < self.config.training.warmup_steps:
             return UpdateMetrics(custom={'warmup': True})
 
         # 3. Sample batch
@@ -283,6 +285,83 @@ class RainbowDQNPlanner(EpisodicAlgorithmPlanner[WorldState, EgoControl]):
         return UpdateMetrics(
             loss=loss.item(),
             q_value=next_q_values.mean().item(),
+            custom={
+                'buffer_size': len(self.replay_buffer),
+                'update_count': self._update_count,
+                'td_error_mean': td_errors.mean(),
+            }
+        )
+
+    def _train_step(self) -> UpdateMetrics:
+        """执行一次训练步骤（从replay buffer采样并更新网络）
+
+        这个方法从update()中抽取出来，用于episode-level训练。
+        与PPO的_ppo_update()类似，在episode结束后调用。
+
+        Returns:
+            UpdateMetrics with loss and Q-value information
+        """
+        # 1. Check if ready to train
+        if len(self.replay_buffer) < self.config.training.batch_size:
+            return UpdateMetrics(custom={'buffer_size': len(self.replay_buffer)})
+
+        # Episode-level training uses one transition per episode, so gate warmup
+        # on buffer size rather than per-step count.
+        if len(self.replay_buffer) < self.config.training.warmup_steps:
+            return UpdateMetrics(custom={'warmup': True})
+
+        # 2. Sample batch
+        batch, indices, weights = self.replay_buffer.sample(self.config.training.batch_size)
+
+        # 3. Prepare data
+        states = [t.state for t in batch]
+        actions = torch.LongTensor([t.action for t in batch]).to(self.device)
+        rewards = torch.FloatTensor([t.reward for t in batch]).to(self.device)
+        next_states = [t.next_state for t in batch]
+        dones = torch.FloatTensor([float(t.done) for t in batch]).to(self.device)
+        weights_tensor = torch.FloatTensor(weights).to(self.device)
+
+        # 4. Current Q distribution (Noisy Nets: reset noise each update)
+        self.q_network.train()
+        self.q_network.reset_noise()
+        q_dist, q_values = self.q_network(states)  # (batch, actions, atoms)
+        q_dist = q_dist[range(len(batch)), actions, :]  # (batch, atoms)
+        q_dist = q_dist.clamp(min=1e-8)  # Numerical stability
+
+        # 5. Target distribution for episode-level (single-decision) training
+        # Use reward-only distribution; no bootstrap from next state.
+        with torch.no_grad():
+            target_dist = self._project_reward_distribution(rewards)
+
+        # 6. Compute loss (KL divergence)
+        log_q_dist = q_dist.log()
+        loss_elementwise = -(target_dist * log_q_dist).sum(dim=1)
+        loss = (weights_tensor * loss_elementwise).mean()
+
+        # 7. Update priorities
+        td_errors = loss_elementwise.detach().cpu().numpy()
+        self.replay_buffer.update_priorities(indices, td_errors)
+
+        # 8. Backpropagation
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            self.q_network.parameters(),
+            self.config.training.gradient_clip
+        )
+        self.optimizer.step()
+
+        # 9. Update target network
+        self._update_count += 1
+        if self._update_count % self.config.training.target_update_freq == 0:
+            self.target_network.load_state_dict(self.q_network.state_dict())
+
+        # 10. Increment step count
+        self._step_count += 1
+
+        return UpdateMetrics(
+            loss=loss.item(),
+            q_value=q_values.mean().item(),
             custom={
                 'buffer_size': len(self.replay_buffer),
                 'update_count': self._update_count,
@@ -458,5 +537,60 @@ class RainbowDQNPlanner(EpisodicAlgorithmPlanner[WorldState, EgoControl]):
             (u + offset).view(-1),
             (next_dist * (b - l.float())).view(-1)
         )
+
+        return target_dist
+
+    def _project_reward_distribution(self, rewards: torch.Tensor) -> torch.Tensor:
+        """Project reward-only distribution onto categorical support (C51).
+
+        Episode-level setting: single decision, return equals total reward.
+        This creates a delta distribution at reward and projects onto support.
+
+        Args:
+            rewards: Rewards tensor, shape (batch,)
+
+        Returns:
+            Projected target distributions, shape (batch, num_atoms)
+        """
+        batch_size = rewards.size(0)
+        delta_z = (self.config.network.v_max - self.config.network.v_min) / (self.config.network.num_atoms - 1)
+
+        # Tz = r (no bootstrap)
+        Tz = rewards.unsqueeze(1).clamp(self.config.network.v_min, self.config.network.v_max)
+
+        # Project onto support
+        b = (Tz - self.config.network.v_min) / delta_z
+        l = b.floor().long()
+        u = b.ceil().long()
+
+        # Distribute probability
+        target_dist = torch.zeros(batch_size, self.config.network.num_atoms, device=self.device)
+        offset = torch.arange(
+            0,
+            batch_size * self.config.network.num_atoms,
+            self.config.network.num_atoms,
+            device=self.device
+        ).unsqueeze(1)
+
+        # Lower bound projection
+        target_dist.view(-1).index_add_(
+            0,
+            (l + offset).view(-1),
+            (u.float() - b).view(-1)
+        )
+
+        # Upper bound projection
+        target_dist.view(-1).index_add_(
+            0,
+            (u + offset).view(-1),
+            (b - l.float()).view(-1)
+        )
+
+        # Handle l == u (all mass on a single atom)
+        eq_mask = (u == l)
+        if eq_mask.any():
+            eq_idx = eq_mask.squeeze(1)  # shape: (batch,)
+            target_dist[eq_idx] = 0.0
+            target_dist[eq_idx, l.squeeze(1)[eq_idx]] = 1.0
 
         return target_dist
