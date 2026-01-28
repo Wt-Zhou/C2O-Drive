@@ -100,6 +100,11 @@ class NoisyLinear(nn.Module):
         self.weight_epsilon.copy_(epsilon_out.ger(epsilon_in))
         self.bias_epsilon.copy_(epsilon_out)
 
+    def set_sigma(self, sigma: float) -> None:
+        """Set noise scale parameters to a fixed sigma value."""
+        self.weight_sigma.data.fill_(sigma / math.sqrt(self.in_features))
+        self.bias_sigma.data.fill_(sigma / math.sqrt(self.out_features))
+
     def _scale_noise(self, size: int) -> torch.Tensor:
         """Generate scaled noise.
 

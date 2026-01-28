@@ -96,8 +96,8 @@ class ComfortReward(RewardFunction):
     """Reward for smooth, comfortable driving (low jerk, reasonable acceleration)."""
 
     def __init__(self,
-                 jerk_penalty_weight: float = 0.3,
-                 accel_penalty_weight: float = 0.15):
+                 jerk_penalty_weight: float = 0.1,
+                 accel_penalty_weight: float = 0.05):
         """
         Args:
             jerk_penalty_weight: Weight for jerk penalty
@@ -163,7 +163,8 @@ class CenterlineReward(RewardFunction):
 
     def __init__(self,
                  max_deviation: float = 2.0,
-                 weight: float = 1.0):
+                 weight: float = 0.5,
+                 out_of_lane_weight: float = 3.0):
         """
         Args:
             max_deviation: Maximum acceptable deviation in meters
@@ -171,6 +172,7 @@ class CenterlineReward(RewardFunction):
         """
         self.max_deviation = max_deviation
         self.weight = weight
+        self.out_of_lane_weight = out_of_lane_weight
 
     def compute(self, state: WorldState, action: Any,
                 next_state: WorldState, info: Dict[str, Any]) -> float:
@@ -185,8 +187,16 @@ class CenterlineReward(RewardFunction):
             deviation = abs(ego_y - reference_y)
 
         if deviation > self.max_deviation:
-            return -self.weight * (deviation - self.max_deviation)
-        return 0.0
+            base_penalty = -self.weight * (deviation - self.max_deviation)
+        else:
+            base_penalty = 0.0
+
+        # Extra penalty when explicitly out of lane
+        if info.get('out_of_lane', False):
+            extra = max(1.0, info.get('out_of_lane_distance', 0.0))
+            base_penalty += -self.out_of_lane_weight * extra
+
+        return base_penalty
 
 
 class TimeReward(RewardFunction):

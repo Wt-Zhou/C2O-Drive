@@ -155,7 +155,7 @@ class CarlaScenarioLibrary:
         # front_vehicle = (5.5, -110.0, 0.5, -90.0)   # 前方20米
 
         # Agent 3: 后方背景车辆
-        rear_vehicle = (9, -60.0, 0.5, -90.0)     # 后方30米
+        rear_vehicle = (9, -60, 0.5, -90.0)     # 后方30米
 
         metadata = {
             "source": "user_defined",

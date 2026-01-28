@@ -75,6 +75,7 @@ class RainbowDQNTrainer:
         scenario_name: Optional[str] = None,
         debug_q: bool = False,
         debug_q_topk: int = 5,
+        random_episodes: int = 0,
     ):
         """Initialize trainer.
 
@@ -95,6 +96,7 @@ class RainbowDQNTrainer:
         self.scenario_name = scenario_name or "unknown"
         self.debug_q = debug_q
         self.debug_q_topk = debug_q_topk
+        self.random_episodes = random_episodes
 
         # Create directories
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -109,6 +111,7 @@ class RainbowDQNTrainer:
         self.episode_lengths = []
         self.episode_stats = []  # 记录每个episode的统计数据
         self.action_reward_stats = {}  # action_idx -> list of rewards
+        self._restored_noisy_sigma = False
 
         # Reward日志文件（与PPO一致）
         self.reward_log_path = self.output_dir / "reward_breakdown.txt"
@@ -344,12 +347,22 @@ class RainbowDQNTrainer:
         # 使用planner的select_action来获得探索（Noisy Nets）
         # 需要手动调用网络来获取Q值和action索引
         # 训练模式：启用Noisy Nets探索
+        # Warmup阶段使用更高的noisy_sigma增强探索
+        warmup_steps = self.planner.config.training.warmup_steps
+        if len(self.planner.replay_buffer) < warmup_steps:
+            self.planner.q_network.set_noisy_sigma(self.planner.config.network.warmup_noisy_sigma)
+        elif not self._restored_noisy_sigma:
+            self.planner.q_network.set_noisy_sigma(self.planner.config.network.noisy_sigma)
+            self._restored_noisy_sigma = True
         self.planner.q_network.reset_noise()  # 重置噪声
         self.planner.q_network.train()  # 训练模式
 
         with torch.no_grad():
             q_dist, q_values = self.planner.q_network([state])
             action_idx = q_values.argmax(dim=1).item()
+
+        if episode_id <= self.random_episodes:
+            action_idx = np.random.randint(len(candidate_trajectories))
 
         if self.debug_q:
             q_np = q_values.cpu().numpy().flatten()
@@ -737,7 +750,7 @@ def parse_arguments():
                        help="Random seed")
 
     # Rainbow DQN hyperparameters
-    parser.add_argument("--lr", type=float, default=6.25e-5,
+    parser.add_argument("--lr", type=float, default=3e-5,
                        help="Learning rate")
     parser.add_argument("--gamma", type=float, default=0.99,
                        help="Discount factor")
@@ -759,6 +772,8 @@ def parse_arguments():
                        help="Print Q-value top-k actions each episode")
     parser.add_argument("--debug-q-topk", type=int, default=5,
                        help="Top-k actions to print when --debug-q is enabled")
+    parser.add_argument("--random-episodes", type=int, default=0,
+                       help="Number of initial episodes to sample actions uniformly at random")
 
     # 评估模式
     parser.add_argument("--eval", action="store_true",
@@ -1008,6 +1023,7 @@ def main():
         scenario_name=args.scenario,
         debug_q=args.debug_q,
         debug_q_topk=args.debug_q_topk,
+        random_episodes=args.random_episodes,
     )
 
     # Train

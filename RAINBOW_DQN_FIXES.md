@@ -32,6 +32,14 @@
 18. 修复Rainbow使用time.default_horizon导致的horizon不一致
 19. 增大NoisyNet探索强度
 20. 增加按动作统计reward分布
+21. 降低NoisyNet探索强度以偏向高回报选择
+22. 进一步降低噪声与学习率以稳定策略
+23. Warmup阶段提高NoisyNet噪声以增加探索
+24. 自车偏移判定加入场景线约束（-90°与0°方向）
+25. 保留原偏移计算并对出线加重惩罚
+26. 出线惩罚最小距离阈值=1
+27. 降低PER采样偏置并增加前期均匀采样
+28. 降低偏离惩罚权重（不影响出线惩罚）
 
 ---
 
@@ -448,6 +456,111 @@
 - 训练结束打印每个action的均值、标准差与样本量
 
 **文件**：`/home/dell/Desktop/C2O-Drive/examples/run_rainbow_dqn_carla.py`
+
+---
+
+### 26. 降低NoisyNet探索强度
+
+**目的**：减少噪声波动，使策略更倾向选择高回报动作。
+
+**修复**：
+- 将`noisy_sigma`从`0.8`降低到`0.2`。
+
+**文件**：`/home/dell/Desktop/C2O-Drive/src/c2o_drive/algorithms/rainbow_dqn/config.py`
+
+---
+
+### 27. 进一步降低噪声与学习率
+
+**目的**：让策略更稳定地选择高回报动作。
+
+**修改**：
+- `noisy_sigma` 从 `0.2` 降到 `0.1`
+- `--lr` 默认从 `6.25e-5` 降到 `3e-5`
+
+**文件**：
+- `/home/dell/Desktop/C2O-Drive/src/c2o_drive/algorithms/rainbow_dqn/config.py`
+- `/home/dell/Desktop/C2O-Drive/examples/run_rainbow_dqn_carla.py`
+
+---
+
+### 28. Warmup阶段提高NoisyNet噪声
+
+**目的**：避免warmup阶段探索过于一致，提升动作覆盖率。
+
+**修改**：
+- 新增`warmup_noisy_sigma`（默认0.5）
+- warmup阶段设置更高噪声，训练开始后恢复到`noisy_sigma`
+
+**文件**：
+- `/home/dell/Desktop/C2O-Drive/src/c2o_drive/algorithms/rainbow_dqn/config.py`
+- `/home/dell/Desktop/C2O-Drive/src/c2o_drive/algorithms/rainbow_dqn/noisy_linear.py`
+- `/home/dell/Desktop/C2O-Drive/src/c2o_drive/algorithms/rainbow_dqn/network.py`
+- `/home/dell/Desktop/C2O-Drive/examples/run_rainbow_dqn_carla.py`
+
+---
+
+### 29. 自车偏移判定加入场景线约束
+
+**需求**：统一所有算法的偏移判定规则：
+- yaw≈-90° 时，x < 4.5 或 x > 9.5 视为出线并惩罚
+- yaw≈0° 时，y < -136 视为出线并惩罚
+
+**实现**：
+- 在 `carla_env.py` 中修改 `lateral_deviation` 计算，使用上述边界条件。
+
+**文件**：`/home/dell/Desktop/C2O-Drive/src/c2o_drive/environments/carla_env.py`
+
+---
+
+### 30. 保留原偏移计算并对出线加重惩罚
+
+**需求**：保持原有`lateral_deviation`计算，同时对出线情况施加更重惩罚。
+
+**实现**：
+- 保留原偏移计算
+- 新增`out_of_lane`与`out_of_lane_distance`信息
+- `CenterlineReward` 在出线时增加额外惩罚
+
+**文件**：
+- `/home/dell/Desktop/C2O-Drive/src/c2o_drive/environments/carla_env.py`
+- `/home/dell/Desktop/C2O-Drive/src/c2o_drive/environments/rewards.py`
+
+---
+
+### 31. 出线惩罚最小距离阈值
+
+**需求**：只要出线，惩罚至少按距离=1计算。
+
+**实现**：
+- `out_of_lane_distance` 取 `max(1.0, 实际超出距离)`。
+
+**文件**：`/home/dell/Desktop/C2O-Drive/src/c2o_drive/environments/rewards.py`
+
+---
+
+### 32. 降低PER偏置 + 前期均匀采样
+
+**目的**：缓解动作塌缩，提升前期动作覆盖。
+
+**修改**：
+- PER alpha 从 0.6 降到 0.4
+- 新增 `--random-episodes`：前 N 个 episode 均匀随机选动作
+
+**文件**：
+- `/home/dell/Desktop/C2O-Drive/src/c2o_drive/algorithms/rainbow_dqn/config.py`
+- `/home/dell/Desktop/C2O-Drive/examples/run_rainbow_dqn_carla.py`
+
+---
+
+### 33. 降低偏离惩罚权重
+
+**需求**：过线惩罚不变，仅降低偏离惩罚。
+
+**修改**：
+- `CenterlineReward.weight` 从 `1.0` 降到 `0.5`
+
+**文件**：`/home/dell/Desktop/C2O-Drive/src/c2o_drive/environments/rewards.py`
 
 ---
 

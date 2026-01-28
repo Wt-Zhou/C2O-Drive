@@ -330,10 +330,16 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
         # yaw接近90°：朝南(+Y)，前进=dy，偏离=|dx|
         # yaw接近180°：朝西(-X)，前进=-dx，偏离=|dy|
         # yaw接近-90°：朝北(-Y)，前进=-dy，偏离=|dx|
+        out_of_lane = False
+        out_of_lane_distance = 0.0
+
         if abs(yaw) < 45:
             # 朝东(+X)
             lateral_deviation = abs(ego_y - init_y)
             forward_progress = ego_x - prev_x
+            if ego_y < -136.0:
+                out_of_lane = True
+                out_of_lane_distance = -136.0 - ego_y
         elif abs(yaw) > 135:
             # 朝西(-X)
             lateral_deviation = abs(ego_y - init_y)
@@ -346,6 +352,12 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
             # 朝北(-Y)，yaw在-135°~-45°之间
             lateral_deviation = abs(ego_x - init_x)
             forward_progress = prev_y - ego_y
+            if ego_x < 4.5:
+                out_of_lane = True
+                out_of_lane_distance = 4.5 - ego_x
+            elif ego_x > 10:
+                out_of_lane = True
+                out_of_lane_distance = ego_x - 9.5
 
         # 构建info字典 - 必须在reward计算之前传入
         info = {
@@ -358,6 +370,8 @@ class CarlaEnvironment(DrivingEnvironment[WorldState, EgoControl]):
             'jerk': jerk,
             'lateral_deviation': lateral_deviation,
             'forward_progress': forward_progress,
+            'out_of_lane': out_of_lane,
+            'out_of_lane_distance': out_of_lane_distance,
         }
 
         # 计算奖励（传入info字典）

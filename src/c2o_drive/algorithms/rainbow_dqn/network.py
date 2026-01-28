@@ -138,6 +138,12 @@ class RainbowNetwork(nn.Module):
             if isinstance(module, NoisyLinear):
                 module.reset_noise()
 
+    def set_noisy_sigma(self, sigma: float) -> None:
+        """Set noise scale for all Noisy Linear layers."""
+        for module in self.modules():
+            if isinstance(module, NoisyLinear):
+                module.set_sigma(sigma)
+
     def get_action(self, world_state: WorldState, deterministic: bool = False) -> int:
         """Select action for a single WorldState.
 

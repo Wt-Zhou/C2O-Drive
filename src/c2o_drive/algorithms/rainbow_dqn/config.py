@@ -25,7 +25,8 @@ class RainbowNetworkConfig:
     num_atoms: int = 51
     v_min: float = -100.0
     v_max: float = 100.0
-    noisy_sigma: float = 0.8
+    noisy_sigma: float = 0.1
+    warmup_noisy_sigma: float = 0.5
     num_actions: int = 15  # Will be set to lattice.num_trajectories
 
 
@@ -40,7 +41,7 @@ class ReplayBufferConfig:
         beta_frames: Number of frames to anneal beta to 1.0
     """
     capacity: int = 100000
-    alpha: float = 0.6
+    alpha: float = 0.4
     beta_start: float = 0.4
     beta_frames: int = 100000
 
